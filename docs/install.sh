@@ -40,4 +40,9 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     echo ""
     echo "Run this to start using grove:"
     echo "  source $PROFILE"
+else
+    # PATH is fine but shell may have cached a failed lookup (zsh hash table).
+    # Can't rehash the parent shell from a pipe, so tell the user.
+    echo ""
+    echo "If 'grove' isn't found, run:  hash -r"
 fi
