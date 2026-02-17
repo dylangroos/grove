@@ -295,7 +295,10 @@ cmd_rm() {
     fi
 
     # Safety: refuse if cwd is inside the worktree
-    if [[ "$PWD" == "$wt_dir"* ]]; then
+    local real_pwd real_wt
+    real_pwd="$(cd "$PWD" && pwd -P)"
+    real_wt="$(cd "$wt_dir" && pwd -P 2>/dev/null || echo "$wt_dir")"
+    if [[ "$real_pwd" == "$real_wt"* ]]; then
         echo -e "${RED}Error:${NC} Cannot remove worktree while inside it" >&2
         echo -e "  cd out first: ${DIM}cd $GROVE_ROOT${NC}" >&2
         exit 1
