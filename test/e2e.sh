@@ -362,31 +362,335 @@ test_no_args() {
     cleanup
 }
 
-test_init_node_defaults() {
-    echo -e "${BOLD}15. init — node defaults${NC}"
-    setup_test_repo
+# ─── Init: unit tests ─────────────────────────────────────────────────
 
-    # Create a Node.js project
+test_detect_node_npm() {
+    echo -e "${BOLD}15. detect — node (npm)${NC}"
+    setup_test_repo
     echo '{"scripts":{"dev":"node server.js"}}' > "$TEST_DIR/package.json"
 
     local output rc=0
     output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
 
     assert_exit 0 "$rc" "exit code"
-    assert_contains "$output" "Detected:" "shows detected type"
-    assert_contains "$output" "Created Grovefile" "created message"
+    assert_contains "$output" "node (npm)" "detects node (npm)"
 
     local grovefile
     grovefile="$(cat "$TEST_DIR/Grovefile")"
-    assert_contains "$grovefile" "npm install" "default setup command"
-    assert_contains "$grovefile" "npm run dev" "default window command"
-    assert_contains "$grovefile" "GROVE_PROJECT=" "project name set"
+    assert_contains "$grovefile" "npm install" "npm install default"
+    assert_contains "$grovefile" "npm run dev" "npm run dev default"
 
     cleanup
 }
 
+test_detect_node_pnpm() {
+    echo -e "${BOLD}16. detect — node (pnpm)${NC}"
+    setup_test_repo
+    echo '{"scripts":{"dev":"vite"}}' > "$TEST_DIR/package.json"
+    touch "$TEST_DIR/pnpm-lock.yaml"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "node (pnpm)" "detects pnpm"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "pnpm install" "pnpm install default"
+    assert_contains "$grovefile" "pnpm run dev" "pnpm run dev default"
+
+    cleanup
+}
+
+test_detect_node_yarn() {
+    echo -e "${BOLD}17. detect — node (yarn)${NC}"
+    setup_test_repo
+    echo '{"scripts":{"start":"node index.js"}}' > "$TEST_DIR/package.json"
+    touch "$TEST_DIR/yarn.lock"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "node (yarn)" "detects yarn"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "yarn install" "yarn install default"
+    assert_contains "$grovefile" "yarn start" "yarn start default (no dev script)"
+
+    cleanup
+}
+
+test_detect_node_bun() {
+    echo -e "${BOLD}18. detect — node (bun)${NC}"
+    setup_test_repo
+    echo '{"scripts":{"dev":"bun run src/index.ts"}}' > "$TEST_DIR/package.json"
+    touch "$TEST_DIR/bun.lockb"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "node (bun)" "detects bun"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "bun install" "bun install default"
+    assert_contains "$grovefile" "bun run dev" "bun run dev default"
+
+    cleanup
+}
+
+test_detect_rust() {
+    echo -e "${BOLD}19. detect — rust${NC}"
+    setup_test_repo
+    echo '[package]' > "$TEST_DIR/Cargo.toml"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Detected: " "shows detected"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "cargo build" "cargo build default"
+    assert_contains "$grovefile" "cargo run" "cargo run default"
+
+    cleanup
+}
+
+test_detect_go() {
+    echo -e "${BOLD}20. detect — go${NC}"
+    setup_test_repo
+    echo 'module example.com/test' > "$TEST_DIR/go.mod"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "go build ./..." "go build default"
+    assert_contains "$grovefile" "go run ." "go run default"
+
+    cleanup
+}
+
+test_detect_python_uv() {
+    echo -e "${BOLD}21. detect — python (uv)${NC}"
+    setup_test_repo
+    echo '[project]' > "$TEST_DIR/pyproject.toml"
+    touch "$TEST_DIR/uv.lock"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "python (uv)" "detects uv"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "uv sync" "uv sync default"
+
+    cleanup
+}
+
+test_detect_python_pip() {
+    echo -e "${BOLD}22. detect — python (pip)${NC}"
+    setup_test_repo
+    echo '[project]' > "$TEST_DIR/pyproject.toml"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Detected: " "shows detected"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "pip install -e ." "pip install -e . default"
+
+    cleanup
+}
+
+test_detect_python_requirements() {
+    echo -e "${BOLD}23. detect — python (requirements.txt)${NC}"
+    setup_test_repo
+    echo 'flask' > "$TEST_DIR/requirements.txt"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "pip install -r requirements.txt" "pip install -r default"
+
+    cleanup
+}
+
+test_detect_ruby_rails() {
+    echo -e "${BOLD}24. detect — ruby (rails)${NC}"
+    setup_test_repo
+    echo 'source "https://rubygems.org"' > "$TEST_DIR/Gemfile"
+    mkdir -p "$TEST_DIR/bin"
+    touch "$TEST_DIR/bin/rails"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "bundle install" "bundle install default"
+    assert_contains "$grovefile" "bin/rails server" "rails server default"
+
+    cleanup
+}
+
+test_detect_php_laravel() {
+    echo -e "${BOLD}25. detect — php (laravel)${NC}"
+    setup_test_repo
+    echo '{}' > "$TEST_DIR/composer.json"
+    touch "$TEST_DIR/artisan"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "composer install" "composer install default"
+    assert_contains "$grovefile" "php artisan serve" "artisan serve default"
+
+    cleanup
+}
+
+test_detect_unknown() {
+    echo -e "${BOLD}26. detect — unknown project${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_not_contains "$output" "Detected:" "no detection message"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "GROVE_PROJECT=" "project name still set"
+    assert_not_contains "$grovefile" "grove_setup" "no setup (nothing detected)"
+    assert_not_contains "$grovefile" "grove_windows" "no windows (nothing detected)"
+
+    cleanup
+}
+
+# ─── Init: window naming ─────────────────────────────────────────────
+
+test_window_name_run() {
+    echo -e "${BOLD}27. window name — run <name>${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf '\nnpm run dev\n\n' | ./grove init 2>&1) || rc=$?
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" 'grove_window "dev"' "names window from run command"
+
+    cleanup
+}
+
+test_window_name_start() {
+    echo -e "${BOLD}28. window name — start${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf '\nnpm start\n\n' | ./grove init 2>&1) || rc=$?
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" 'grove_window "start"' "names window 'start'"
+
+    cleanup
+}
+
+test_window_name_cd() {
+    echo -e "${BOLD}29. window name — cd <dir>${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf '\ncd frontend && npm run dev\n\n' | ./grove init 2>&1) || rc=$?
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" 'grove_window "frontend"' "names window from cd dir"
+
+    cleanup
+}
+
+test_window_name_fallback() {
+    echo -e "${BOLD}30. window name — fallback${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf '\npython app.py\n\n' | ./grove init 2>&1) || rc=$?
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" 'grove_window "window-1"' "falls back to window-N"
+
+    cleanup
+}
+
+# ─── Init: multi-command + skip ──────────────────────────────────────
+
+test_init_multiple_setup_commands() {
+    echo -e "${BOLD}31. init — multiple setup commands${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf 'npm install\nnpm run build\n\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "npm install" "first setup command"
+    assert_contains "$grovefile" "npm run build" "second setup command"
+
+    cleanup
+}
+
+test_init_skip_all() {
+    echo -e "${BOLD}32. init — skip all (unknown project)${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "GROVE_PROJECT=" "only project name"
+    assert_not_contains "$grovefile" "grove_setup" "no setup section"
+    assert_not_contains "$grovefile" "grove_windows" "no windows section"
+
+    cleanup
+}
+
+# ─── Init: E2E ───────────────────────────────────────────────────────
+
 test_init_custom_commands() {
-    echo -e "${BOLD}16. init — custom commands${NC}"
+    echo -e "${BOLD}33. init — custom commands${NC}"
     setup_test_repo
 
     local output rc=0
@@ -404,7 +708,7 @@ test_init_custom_commands() {
 }
 
 test_init_already_exists() {
-    echo -e "${BOLD}17. init — already exists${NC}"
+    echo -e "${BOLD}34. init — already exists${NC}"
     setup_test_repo
 
     echo "# existing" > "$TEST_DIR/Grovefile"
@@ -419,7 +723,7 @@ test_init_already_exists() {
 }
 
 test_init_not_in_git_repo() {
-    echo -e "${BOLD}18. init — not in git repo${NC}"
+    echo -e "${BOLD}35. init — not in git repo${NC}"
     local tmpdir
     tmpdir="$(mktemp -d)"
 
@@ -433,7 +737,7 @@ test_init_not_in_git_repo() {
 }
 
 test_unknown_flag() {
-    echo -e "${BOLD}19. unknown flag${NC}"
+    echo -e "${BOLD}36. unknown flag${NC}"
     setup_test_repo
 
     local output rc=0
@@ -474,7 +778,28 @@ main() {
     test_rm_nonexistent
     test_grovefile_with_windows
     test_no_args
-    test_init_node_defaults
+    # Init: detection per project type
+    test_detect_node_npm
+    test_detect_node_pnpm
+    test_detect_node_yarn
+    test_detect_node_bun
+    test_detect_rust
+    test_detect_go
+    test_detect_python_uv
+    test_detect_python_pip
+    test_detect_python_requirements
+    test_detect_ruby_rails
+    test_detect_php_laravel
+    test_detect_unknown
+    # Init: window naming
+    test_window_name_run
+    test_window_name_start
+    test_window_name_cd
+    test_window_name_fallback
+    # Init: multi-command + skip
+    test_init_multiple_setup_commands
+    test_init_skip_all
+    # Init: E2E
     test_init_custom_commands
     test_init_already_exists
     test_init_not_in_git_repo
