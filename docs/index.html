@@ -5,6 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Grove — Dev environments for humans and agents</title>
   <meta name="description" content="Grove is the fastest way to branch off, work in isolation, and clean up. Git worktrees + tmux, nothing more.">
+  <meta name="theme-color" content="#4caf50">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Grove — Dev environments for humans and agents">
+  <meta property="og:description" content="Git worktrees + tmux. Branch name in, environment out. No config required.">
+  <meta property="og:url" content="https://grove.wtf">
+  <meta property="og:type" content="website">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Grove — Dev environments for humans and agents">
+  <meta name="twitter:description" content="Git worktrees + tmux. Branch name in, environment out. No config required.">
+
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='12' fill='%230a1a0f'/><text x='50' y='72' font-size='60' text-anchor='middle' fill='%2366bb6a'>⌥</text></svg>">
+
   <style>
     *, *::before, *::after {
       margin: 0;
@@ -24,6 +40,7 @@
 
     html {
       font-size: 16px;
+      scroll-behavior: smooth;
     }
 
     body {
@@ -102,6 +119,7 @@
       align-items: center;
       justify-content: center;
       padding: 2rem 0;
+      position: relative;
     }
 
     .ascii-art {
@@ -139,6 +157,7 @@
       border-radius: 4px;
       cursor: pointer;
       transition: border-color 0.15s;
+      position: relative;
     }
 
     .install-cmd:hover {
@@ -148,6 +167,35 @@
     .install-cmd .prompt {
       color: var(--text-dim);
       user-select: none;
+    }
+
+    .install-cmd .copied {
+      color: var(--accent);
+      font-size: 0.8rem;
+    }
+
+    .requirements {
+      margin-top: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      opacity: 0.6;
+    }
+
+    /* Scroll hint */
+    .scroll-hint {
+      position: absolute;
+      bottom: 2rem;
+      left: 50%;
+      transform: translateX(-50%);
+      animation: bounce 2s ease infinite;
+      color: var(--text-dim);
+      opacity: 0.4;
+      font-size: 1.25rem;
+    }
+
+    @keyframes bounce {
+      0%, 100% { transform: translateX(-50%) translateY(0); }
+      50% { transform: translateX(-50%) translateY(6px); }
     }
 
     /* Features */
@@ -178,7 +226,15 @@
       line-height: 1.5;
     }
 
-    /* Demo section */
+    /* Section heading */
+    .section-heading {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 3rem 0 1rem;
+    }
+
+    /* Demo / code blocks */
     .demo {
       border: 1px dashed var(--border);
       padding: 1.5rem 2rem;
@@ -202,6 +258,19 @@
     .demo .prompt {
       color: var(--text-dim);
       user-select: none;
+    }
+
+    .demo .comment {
+      color: var(--text-dim);
+      opacity: 0.5;
+    }
+
+    .demo .string {
+      color: var(--accent-bright);
+    }
+
+    .demo .func {
+      color: var(--text);
     }
 
     /* Footer */
@@ -285,7 +354,7 @@
     <div class="logo">grove<span>.wtf</span></div>
     <div class="nav-links">
       <a href="https://github.com/dylangroos/grove" target="_blank">GitHub</a>
-      <a href="#features">Docs</a>
+      <a href="#grovefile">Docs</a>
       <a href="#install">Install</a>
     </div>
   </nav>
@@ -315,9 +384,12 @@
       <h1 class="tagline">Branch off. Work in isolation. Clean up.</h1>
       <p class="subtitle">Git worktrees + tmux. Branch name in, environment out. No config required.</p>
 
-      <div class="install-cmd" id="install" onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/dylangroos/grove/main/install.sh | bash')">
-        <span class="prompt">$ </span>curl -fsSL grove.wtf/install.sh | bash
+      <div class="install-cmd" id="install" onclick="copyInstall(this)">
+        <span class="prompt">$ </span><span class="cmd-text">curl -fsSL grove.wtf/install.sh | bash</span>
       </div>
+      <div class="requirements">requires bash 4+ · git · tmux</div>
+
+      <div class="scroll-hint" aria-hidden="true">&#8964;</div>
     </section>
 
     <section class="features" id="features">
@@ -338,6 +410,19 @@
         <div class="feature-desc">grove, attach, ls, rm, help, version. One mental model. Nothing to memorize, nothing to configure.</div>
       </div>
     </section>
+
+    <h2 class="section-heading" id="grovefile">Configure with a Grovefile</h2>
+    <div class="demo">
+<span class="comment"># Grovefile — drop in your repo root</span>
+
+<span class="func">grove_setup</span>() {
+    npm install
+}
+
+<span class="func">grove_windows</span>() {
+    grove_window <span class="string">"server"</span> <span class="string">"npm run dev"</span>
+    grove_window <span class="string">"ui"</span>     <span class="string">"cd frontend && npm run dev"</span>
+}</div>
 
     <div class="demo">
 <span class="prompt">$ </span><span class="cmd">grove feat/auth-flow</span>
@@ -362,9 +447,23 @@ refactor/api                   -</span>
   </main>
 
   <footer>
-    <span>&copy; 2025 grove.wtf</span>
+    <span>&copy; 2026 grove.wtf</span>
     <a href="https://github.com/dylangroos/grove" target="_blank">GitHub</a>
   </footer>
+
+  <script>
+    function copyInstall(el) {
+      navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/dylangroos/grove/main/install.sh | bash');
+      var cmdText = el.querySelector('.cmd-text');
+      var original = cmdText.textContent;
+      cmdText.textContent = 'Copied!';
+      cmdText.classList.add('copied');
+      setTimeout(function() {
+        cmdText.textContent = original;
+        cmdText.classList.remove('copied');
+      }, 2000);
+    }
+  </script>
 
 </body>
 </html>
