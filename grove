@@ -150,7 +150,9 @@ cmd_open() {
         # Run setup hook
         if declare -f grove_setup >/dev/null 2>&1; then
             echo -e "\n${BOLD}Running setup...${NC}"
-            (cd "$wt_dir" && grove_setup)
+            if ! (cd "$wt_dir" && grove_setup); then
+                echo -e "${YELLOW}Warning:${NC} grove_setup failed (worktree still created)"
+            fi
         fi
 
         echo -e "${GREEN}✓${NC} Worktree created: $wt_dir"
