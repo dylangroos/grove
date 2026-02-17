@@ -1,0 +1,798 @@
+#!/usr/bin/env bash
+#
+# grove — parallel dev environment manager
+#
+# Manages multiple isolated development environments using git worktrees and
+# tmux sessions. Each environment ("instance") gets its own worktree, tmux
+# session with service windows, and isolated ports — so you can work on
+# multiple branches simultaneously without conflicts.
+#
+# INSTALLATION:
+#   make install-grove          # symlinks grove → ~/.local/bin/grove
+#   # or: bash grove/install.sh
+#
+# QUICK START:
+#   grove feat/my-feature       # create worktree + install deps + start services
+#   grove ls                    # list all worktrees with health status
+#   grove logs 0                # attach to tmux session for instance 0
+#   grove rm feat/my-feature    # stop services + remove worktree
+#
+# HOW IT WORKS:
+#   1. grove walks up directories to find the nearest Grovefile (like git
+#      finds .git/)
+#   2. Sources the Grovefile to load project-specific configuration — port
+#      scheme, tmux windows, shared services, health checks, etc.
+#   3. Manages worktrees in .worktrees/, instance markers in .grove-instance,
+#      and tmux sessions named grove-<project>-<N>
+#
+# CONFIGURATION:
+#   All project-specific behavior is defined in the Grovefile (a bash script
+#   at the repo root). The Grovefile sets variables and defines hook functions
+#   that grove calls at the right time. See the Grovefile in this repo for a
+#   working example.
+#
+#   Required:
+#     GROVE_PROJECT              Project name (e.g. "marmot")
+#
+#   Optional variables:
+#     GROVE_MAX_INSTANCES        Max parallel instances (default: 4)
+#
+#   Hook functions (all optional):
+#     grove_ports <N>            Set port variables for instance N. Called
+#                                before grove_windows and grove_health. Should
+#                                set shell variables like APP_PORT, UI_PORT.
+#     grove_setup                Run when creating a new worktree (e.g. uv sync).
+#                                Executed with cwd set to the new worktree.
+#     grove_windows <N>          Define tmux windows by calling grove_window()
+#                                for each window you want.
+#     grove_shared               Start shared services (Redis, databases, etc.)
+#                                by calling grove_ensure_service() for each.
+#     grove_health               Return 0 if the instance is healthy. Used by
+#                                grove start (waits up to 2 min) and grove ls/
+#                                grove status (instantaneous check).
+#     grove_post_start <N>       Run after the instance is healthy (e.g.
+#                                register a deployment with an orchestrator).
+#
+#   Helper functions (available inside Grovefile hooks):
+#     grove_window <name> <cmd>  Register a tmux window. The window will be
+#                                created in the instance's tmux session and
+#                                <cmd> will be sent to it.
+#     grove_ensure_service <name> <check_cmd> <start_cmd>
+#                                Idempotently start a shared service. Runs
+#                                <check_cmd> first; if it fails, runs
+#                                <start_cmd> and waits up to 30s for
+#                                <check_cmd> to pass.
+#
+# INSTANCE ISOLATION:
+#   Each instance gets:
+#     - Its own git worktree      .worktrees/<branch-slug>/
+#     - An instance marker        .worktrees/<branch-slug>/.grove-instance
+#     - A tmux session            grove-<project>-<N>
+#     - Isolated ports            defined by grove_ports() in the Grovefile
+#
+#   When you run grove commands from inside a worktree, the instance number
+#   is auto-detected from .grove-instance — so `grove stop` just works.
+#
+# DEPENDENCIES:
+#   - bash 4+        (macOS: brew install bash)
+#   - git            (for worktree management)
+#   - tmux           (for session/window management)
+#
+
+set -euo pipefail
+
+GROVE_VERSION="0.1.0"
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ─── Globals (set by Grovefile) ──────────────────────────────────────────────
+
+GROVE_ROOT=""
+GROVE_PROJECT=""
+GROVE_MAX_INSTANCES=4
+GROVE_WORKTREE_DIR=".worktrees"
+GROVE_INSTANCE_FILE=".grove-instance"
+
+# Internal state for window collection
+_GROVE_WINDOWS=()
+_GROVE_WINDOW_CMDS=()
+
+# ─── Helper functions (available to Grovefile) ───────────────────────────────
+
+grove_window() {
+    # Register a tmux window. Called from grove_windows() in Grovefile.
+    # Usage: grove_window <name> <command>
+    local name="$1"
+    local cmd="$2"
+    _GROVE_WINDOWS+=("$name")
+    _GROVE_WINDOW_CMDS+=("$cmd")
+}
+
+grove_ensure_service() {
+    # Start a shared service if not already running.
+    # Usage: grove_ensure_service <name> <check_cmd> <start_cmd>
+    local name="$1"
+    local check_cmd="$2"
+    local start_cmd="$3"
+
+    if eval "$check_cmd" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} $name already running"
+    else
+        echo -e "  ${YELLOW}→${NC} Starting $name..."
+        if eval "$start_cmd"; then
+            # Wait for service to be ready
+            local ready=false
+            for i in $(seq 1 30); do
+                if eval "$check_cmd" 2>/dev/null; then
+                    ready=true
+                    break
+                fi
+                sleep 1
+            done
+            if $ready; then
+                echo -e "  ${GREEN}✓${NC} $name started"
+            else
+                echo -e "  ${YELLOW}!${NC} $name may still be starting"
+            fi
+        else
+            echo -e "  ${RED}✗${NC} $name failed to start"
+            return 1
+        fi
+    fi
+}
+
+# ─── Configuration ───────────────────────────────────────────────────────────
+
+find_grove_root() {
+    # Walk up from $PWD to find the nearest Grovefile
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/Grovefile" ]]; then
+            GROVE_ROOT="$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+load_grovefile() {
+    if ! find_grove_root; then
+        echo -e "${RED}Error:${NC} No Grovefile found (searched from $PWD to /)" >&2
+        exit 1
+    fi
+
+    # Source the Grovefile to load config and hook functions
+    # shellcheck disable=SC1091
+    source "$GROVE_ROOT/Grovefile"
+
+    if [[ -z "${GROVE_PROJECT:-}" ]]; then
+        echo -e "${RED}Error:${NC} GROVE_PROJECT not set in Grovefile" >&2
+        exit 1
+    fi
+}
+
+# ─── Naming ──────────────────────────────────────────────────────────────────
+
+session_name() {
+    # tmux session name for an instance
+    local instance="$1"
+    echo "grove-${GROVE_PROJECT}-${instance}"
+}
+
+slugify_branch() {
+    # Convert branch name to filesystem-safe slug
+    echo "$1" | sed 's/\//-/g; s/[^a-zA-Z0-9._-]/-/g'
+}
+
+# ─── Instance Detection ─────────────────────────────────────────────────────
+
+detect_instance() {
+    # If we're inside a worktree, read its .grove-instance file
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/$GROVE_INSTANCE_FILE" ]]; then
+            cat "$dir/$GROVE_INSTANCE_FILE"
+            return 0
+        fi
+        # Don't search above the grove root
+        if [[ "$dir" == "$GROVE_ROOT" ]]; then
+            break
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+find_free_instance() {
+    # Find the lowest unused instance slot
+    for i in $(seq 0 $((GROVE_MAX_INSTANCES - 1))); do
+        local session
+        session="$(session_name "$i")"
+        if ! tmux has-session -t "$session" 2>/dev/null; then
+            echo "$i"
+            return 0
+        fi
+    done
+    echo -e "${RED}Error:${NC} All $GROVE_MAX_INSTANCES instance slots are in use" >&2
+    return 1
+}
+
+find_worktree_for_instance() {
+    # Find the worktree directory assigned to a given instance
+    local instance="$1"
+    local wt_base="$GROVE_ROOT/$GROVE_WORKTREE_DIR"
+
+    if [[ -d "$wt_base" ]]; then
+        for wt_dir in "$wt_base"/*/; do
+            [[ -d "$wt_dir" ]] || continue
+            if [[ -f "${wt_dir}${GROVE_INSTANCE_FILE}" ]]; then
+                local wt_instance
+                wt_instance="$(cat "${wt_dir}${GROVE_INSTANCE_FILE}")"
+                if [[ "$wt_instance" == "$instance" ]]; then
+                    echo "${wt_dir%/}"
+                    return 0
+                fi
+            fi
+        done
+    fi
+    return 1
+}
+
+# ─── Instance Commands ───────────────────────────────────────────────────────
+
+cmd_start() {
+    local instance="${1:-}"
+
+    if [[ -z "$instance" ]]; then
+        instance="$(detect_instance 2>/dev/null || true)"
+        if [[ -z "$instance" ]]; then
+            echo -e "${RED}Error:${NC} No instance number given and not in a worktree" >&2
+            echo "Usage: grove start <N>" >&2
+            exit 1
+        fi
+    fi
+
+    local session
+    session="$(session_name "$instance")"
+
+    if tmux has-session -t "$session" 2>/dev/null; then
+        echo -e "${YELLOW}Instance $instance is already running${NC} (session: $session)"
+        return 0
+    fi
+
+    echo -e "${BOLD}Starting instance $instance${NC} (session: $session)"
+
+    # Reset window collection
+    _GROVE_WINDOWS=()
+    _GROVE_WINDOW_CMDS=()
+
+    # Load ports for this instance
+    if declare -f grove_ports >/dev/null 2>&1; then
+        grove_ports "$instance"
+    fi
+
+    # Start shared services
+    if declare -f grove_shared >/dev/null 2>&1; then
+        echo -e "\n${BOLD}Shared services:${NC}"
+        grove_shared
+    fi
+
+    # Collect window definitions
+    if declare -f grove_windows >/dev/null 2>&1; then
+        grove_windows "$instance"
+    fi
+
+    if [[ ${#_GROVE_WINDOWS[@]} -eq 0 ]]; then
+        echo -e "${RED}Error:${NC} No windows defined. Implement grove_windows() in your Grovefile." >&2
+        exit 1
+    fi
+
+    # Determine working directory (worktree if assigned, else repo root)
+    local workdir="$GROVE_ROOT"
+    local wt_dir
+    if wt_dir="$(find_worktree_for_instance "$instance")"; then
+        workdir="$wt_dir"
+    fi
+
+    # Create tmux session with the first window
+    tmux new-session -d -s "$session" -n "${_GROVE_WINDOWS[0]}" -c "$workdir"
+    tmux send-keys -t "$session:${_GROVE_WINDOWS[0]}" "${_GROVE_WINDOW_CMDS[0]}" C-m
+
+    # Create remaining windows
+    for i in $(seq 1 $((${#_GROVE_WINDOWS[@]} - 1))); do
+        tmux new-window -t "$session" -n "${_GROVE_WINDOWS[$i]}" -c "$workdir"
+        tmux send-keys -t "$session:${_GROVE_WINDOWS[$i]}" "${_GROVE_WINDOW_CMDS[$i]}" C-m
+    done
+
+    # Add a shell window for interactive use
+    tmux new-window -t "$session" -n "shell" -c "$workdir"
+
+    echo -e "\n${GREEN}✓${NC} Instance $instance started"
+    echo -e "  Windows: ${_GROVE_WINDOWS[*]}"
+    echo -e "  Attach:  ${DIM}grove logs $instance${NC}"
+
+    # Wait for health
+    if declare -f grove_health >/dev/null 2>&1; then
+        echo -ne "\n  Waiting for health"
+        local healthy=false
+        for i in $(seq 1 60); do
+            if grove_health 2>/dev/null; then
+                healthy=true
+                break
+            fi
+            echo -n "."
+            sleep 2
+        done
+        echo
+        if $healthy; then
+            echo -e "  ${GREEN}✓${NC} Health check passed"
+        else
+            echo -e "  ${YELLOW}!${NC} Health check timed out (instance may still be starting)"
+        fi
+    fi
+
+    # Post-start hook
+    if declare -f grove_post_start >/dev/null 2>&1; then
+        echo -e "\n  Running post-start..."
+        grove_post_start "$instance" || true
+    fi
+}
+
+cmd_stop() {
+    local instance="${1:-}"
+
+    if [[ -z "$instance" ]]; then
+        instance="$(detect_instance 2>/dev/null || true)"
+        if [[ -z "$instance" ]]; then
+            echo -e "${RED}Error:${NC} No instance number given and not in a worktree" >&2
+            echo "Usage: grove stop <N>" >&2
+            exit 1
+        fi
+    fi
+
+    local session
+    session="$(session_name "$instance")"
+
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+        echo -e "${YELLOW}Instance $instance is not running${NC}"
+        return 0
+    fi
+
+    echo -e "Stopping instance $instance (session: $session)..."
+    tmux kill-session -t "$session"
+    echo -e "${GREEN}✓${NC} Instance $instance stopped"
+}
+
+cmd_status() {
+    echo -e "${BOLD}Grove instances (${GROVE_PROJECT}):${NC}\n"
+
+    local found=false
+    for i in $(seq 0 $((GROVE_MAX_INSTANCES - 1))); do
+        local session
+        session="$(session_name "$i")"
+        if tmux has-session -t "$session" 2>/dev/null; then
+            found=true
+
+            # Find branch and workdir
+            local workdir="$GROVE_ROOT"
+            local branch
+            branch="$(cd "$GROVE_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+            local wt_dir
+            if wt_dir="$(find_worktree_for_instance "$i")"; then
+                workdir="$wt_dir"
+                branch="$(cd "$workdir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+            fi
+
+            # Load ports
+            if declare -f grove_ports >/dev/null 2>&1; then
+                grove_ports "$i"
+            fi
+
+            # Check health
+            local health="${DIM}unknown${NC}"
+            if declare -f grove_health >/dev/null 2>&1; then
+                if grove_health 2>/dev/null; then
+                    health="${GREEN}healthy${NC}"
+                else
+                    health="${RED}unhealthy${NC}"
+                fi
+            fi
+
+            # List tmux windows
+            local windows
+            windows="$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | tr '\n' ' ')"
+
+            echo -e "  ${GREEN}●${NC} Instance ${BOLD}$i${NC}  [$branch]  $health"
+            echo -e "    Session: $session"
+            echo -e "    Dir:     $workdir"
+            echo -e "    Windows: $windows"
+            if [[ -n "${APP_PORT:-}" ]]; then
+                echo -e "    Ports:   app=${APP_PORT:-?} ui=${UI_PORT:-?}"
+            fi
+            echo
+        fi
+    done
+
+    if ! $found; then
+        echo -e "  ${DIM}No running instances${NC}\n"
+    fi
+
+    # Shared services status
+    if declare -f grove_shared >/dev/null 2>&1; then
+        echo -e "${BOLD}Shared services:${NC}"
+        grove_shared 2>/dev/null || true
+        echo
+    fi
+}
+
+cmd_logs() {
+    local instance="${1:-}"
+
+    if [[ -z "$instance" ]]; then
+        instance="$(detect_instance 2>/dev/null || true)"
+        if [[ -z "$instance" ]]; then
+            echo -e "${RED}Error:${NC} No instance number given and not in a worktree" >&2
+            echo "Usage: grove logs <N>" >&2
+            exit 1
+        fi
+    fi
+
+    local session
+    session="$(session_name "$instance")"
+
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+        echo -e "${RED}Error:${NC} Instance $instance is not running" >&2
+        exit 1
+    fi
+
+    exec tmux attach-session -t "$session"
+}
+
+cmd_ports() {
+    echo -e "${BOLD}Port mappings (${GROVE_PROJECT}):${NC}\n"
+
+    local found=false
+    for i in $(seq 0 $((GROVE_MAX_INSTANCES - 1))); do
+        local session
+        session="$(session_name "$i")"
+        if tmux has-session -t "$session" 2>/dev/null; then
+            found=true
+            if declare -f grove_ports >/dev/null 2>&1; then
+                grove_ports "$i"
+
+                echo -e "  Instance ${BOLD}$i${NC}:"
+                # Print all known port variables
+                for var in APP_PORT UI_PORT CELERY_FLOWER_PORT; do
+                    if [[ -n "${!var:-}" ]]; then
+                        echo "    $var=${!var}"
+                    fi
+                done
+
+                # Also print SSH port-forward command
+                if [[ -n "${APP_PORT:-}" ]]; then
+                    echo -e "    ${DIM}ssh -L ${APP_PORT}:localhost:${APP_PORT} -L ${UI_PORT}:localhost:${UI_PORT} <host>${NC}"
+                fi
+                echo
+            fi
+        fi
+    done
+
+    if ! $found; then
+        echo -e "  ${DIM}No running instances${NC}"
+    fi
+}
+
+# ─── Worktree Commands ──────────────────────────────────────────────────────
+
+cmd_worktree_add() {
+    local branch="$1"
+    local start_after=true
+
+    # Parse flags
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-start) start_after=false ;;
+            *) echo -e "${RED}Error:${NC} Unknown option: $1" >&2; exit 1 ;;
+        esac
+        shift
+    done
+
+    local slug
+    slug="$(slugify_branch "$branch")"
+    local wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    if [[ -d "$wt_dir" ]]; then
+        echo -e "${YELLOW}Worktree already exists:${NC} $wt_dir"
+        if $start_after; then
+            local instance
+            if [[ -f "$wt_dir/$GROVE_INSTANCE_FILE" ]]; then
+                instance="$(cat "$wt_dir/$GROVE_INSTANCE_FILE")"
+            else
+                instance="$(find_free_instance)"
+                echo "$instance" > "$wt_dir/$GROVE_INSTANCE_FILE"
+            fi
+            cmd_start "$instance"
+        fi
+        return 0
+    fi
+
+    # Create worktree directory parent
+    mkdir -p "$GROVE_ROOT/$GROVE_WORKTREE_DIR"
+
+    echo -e "${BOLD}Creating worktree:${NC} $branch"
+    echo -e "  Directory: $wt_dir"
+
+    # Create the git worktree
+    if git -C "$GROVE_ROOT" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        # Local branch exists
+        git -C "$GROVE_ROOT" worktree add "$wt_dir" "$branch"
+    elif git -C "$GROVE_ROOT" show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+        # Remote branch exists
+        git -C "$GROVE_ROOT" worktree add --track -b "$branch" "$wt_dir" "origin/$branch"
+    else
+        # New branch — create from current HEAD
+        echo -e "  ${DIM}Branch '$branch' not found, creating from current HEAD${NC}"
+        git -C "$GROVE_ROOT" worktree add -b "$branch" "$wt_dir"
+    fi
+
+    # Assign instance number
+    local instance
+    instance="$(find_free_instance)"
+    echo "$instance" > "$wt_dir/$GROVE_INSTANCE_FILE"
+    echo -e "  Assigned instance: ${BOLD}$instance${NC}"
+
+    # Copy .env if it exists in the main repo
+    if [[ -f "$GROVE_ROOT/.env" ]]; then
+        cp "$GROVE_ROOT/.env" "$wt_dir/.env"
+        echo -e "  ${DIM}Copied .env${NC}"
+    fi
+
+    # Run setup hook
+    if declare -f grove_setup >/dev/null 2>&1; then
+        echo -e "\n${BOLD}Running setup...${NC}"
+        (cd "$wt_dir" && grove_setup)
+    fi
+
+    # Generate CLAUDE.md for the worktree
+    local session
+    session="$(session_name "$instance")"
+    cat > "$wt_dir/CLAUDE.md" << EOF
+# Worktree: $branch (instance $instance)
+
+This is a grove-managed worktree.
+
+\`\`\`bash
+grove start $instance    # Start this instance
+grove stop $instance     # Stop this instance
+grove logs $instance     # Attach to tmux session ($session)
+grove status             # Show all instances
+\`\`\`
+EOF
+    echo -e "  ${DIM}Generated CLAUDE.md${NC}"
+
+    echo -e "\n${GREEN}✓${NC} Worktree ready: $wt_dir"
+
+    if $start_after; then
+        echo
+        cmd_start "$instance"
+    else
+        echo -e "  Start with: ${DIM}grove start $instance${NC}"
+    fi
+}
+
+cmd_worktree_list() {
+    echo -e "${BOLD}Grove worktrees (${GROVE_PROJECT}):${NC}\n"
+
+    local wt_base="$GROVE_ROOT/$GROVE_WORKTREE_DIR"
+
+    if [[ ! -d "$wt_base" ]] || [[ -z "$(ls -A "$wt_base" 2>/dev/null)" ]]; then
+        echo -e "  ${DIM}No worktrees${NC}"
+        return 0
+    fi
+
+    printf "  ${DIM}%-30s %-6s %-30s %-10s${NC}\n" "DIRECTORY" "INST" "BRANCH" "STATUS"
+
+    for wt_dir in "$wt_base"/*/; do
+        [[ -d "$wt_dir" ]] || continue
+
+        local name
+        name="$(basename "$wt_dir")"
+
+        # Read instance number
+        local instance="-"
+        if [[ -f "${wt_dir}${GROVE_INSTANCE_FILE}" ]]; then
+            instance="$(cat "${wt_dir}${GROVE_INSTANCE_FILE}")"
+        fi
+
+        # Read branch
+        local branch
+        branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+
+        # Determine status
+        local status="${DIM}stopped${NC}"
+        if [[ "$instance" != "-" ]]; then
+            local session
+            session="$(session_name "$instance")"
+            if tmux has-session -t "$session" 2>/dev/null; then
+                # Load ports and check health
+                if declare -f grove_ports >/dev/null 2>&1; then
+                    grove_ports "$instance"
+                fi
+                if declare -f grove_health >/dev/null 2>&1 && grove_health 2>/dev/null; then
+                    status="${GREEN}healthy${NC}"
+                else
+                    status="${YELLOW}running${NC}"
+                fi
+            fi
+        fi
+
+        printf "  %-30s %-6s %-30s " "$name" "$instance" "$branch"
+        echo -e "$status"
+    done
+    echo
+}
+
+cmd_worktree_rm() {
+    local branch="$1"
+    local slug
+    slug="$(slugify_branch "$branch")"
+    local wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} Worktree not found: $wt_dir" >&2
+        exit 1
+    fi
+
+    # Stop instance if running
+    if [[ -f "$wt_dir/$GROVE_INSTANCE_FILE" ]]; then
+        local instance
+        instance="$(cat "$wt_dir/$GROVE_INSTANCE_FILE")"
+        cmd_stop "$instance" 2>/dev/null || true
+    fi
+
+    echo -e "Removing worktree: $slug"
+    git -C "$GROVE_ROOT" worktree remove "$wt_dir" --force 2>/dev/null || rm -rf "$wt_dir"
+    git -C "$GROVE_ROOT" worktree prune 2>/dev/null || true
+    echo -e "${GREEN}✓${NC} Worktree removed: $slug"
+}
+
+# ─── Bulk Commands ───────────────────────────────────────────────────────────
+
+cmd_start_all() {
+    local count="${1:-3}"
+    echo -e "${BOLD}Starting $count instances...${NC}\n"
+    for i in $(seq 0 $((count - 1))); do
+        cmd_start "$i"
+        echo
+    done
+}
+
+cmd_stop_all() {
+    echo -e "${BOLD}Stopping all instances...${NC}\n"
+    for i in $(seq 0 $((GROVE_MAX_INSTANCES - 1))); do
+        local session
+        session="$(session_name "$i")"
+        if tmux has-session -t "$session" 2>/dev/null; then
+            cmd_stop "$i"
+        fi
+    done
+}
+
+# ─── Help ────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+    cat <<EOF
+$(echo -e "${BOLD}grove${NC}") — parallel dev environment manager (v${GROVE_VERSION})
+
+$(echo -e "${BOLD}USAGE:${NC}")
+  grove <branch>             Create worktree + start instance
+  grove <command> [args]     Run a grove command
+
+$(echo -e "${BOLD}WORKTREE COMMANDS:${NC}")
+  grove <branch>             Create worktree, install deps, start instance
+  grove ls                   List all worktrees with branch, instance, health
+  grove rm <branch>          Stop instance + remove worktree
+
+$(echo -e "${BOLD}INSTANCE COMMANDS:${NC}")
+  grove start [N]            Start instance N (auto-detects from .grove-instance)
+  grove stop [N]             Stop instance N
+  grove status               Show all instances + shared services
+  grove logs [N]             Attach to tmux session for instance N
+  grove ports                Show port assignments for running instances
+
+$(echo -e "${BOLD}BULK COMMANDS:${NC}")
+  grove start-all [N]        Start N instances (default: 3)
+  grove stop-all             Stop all running instances
+
+$(echo -e "${BOLD}OTHER:${NC}")
+  grove help                 Show this help
+  grove version              Show version
+
+$(echo -e "${BOLD}CONFIGURATION:${NC}")
+  Grove looks for a Grovefile in the current or parent directories.
+  The Grovefile defines project config and hook functions:
+
+    GROVE_PROJECT            Project name (used in tmux session names)
+    GROVE_MAX_INSTANCES      Max parallel instances (default: 4)
+    grove_ports()            Port assignments per instance
+    grove_windows()          tmux window definitions per instance
+    grove_setup()            Run when creating a new worktree
+    grove_shared()           Start shared services (Redis, etc.)
+    grove_health()           Health check for an instance
+    grove_post_start()       Run after instance is healthy
+EOF
+}
+
+# ─── Main Dispatch ───────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+
+    case "$cmd" in
+        help|--help|-h)
+            cmd_help
+            ;;
+        version|--version|-v)
+            echo "grove v${GROVE_VERSION}"
+            ;;
+        ls|list)
+            load_grovefile
+            cmd_worktree_list
+            ;;
+        rm|remove)
+            load_grovefile
+            if [[ -z "${2:-}" ]]; then
+                echo -e "${RED}Error:${NC} Missing branch name" >&2
+                echo "Usage: grove rm <branch>" >&2
+                exit 1
+            fi
+            cmd_worktree_rm "$2"
+            ;;
+        start)
+            load_grovefile
+            cmd_start "${2:-}"
+            ;;
+        stop)
+            load_grovefile
+            cmd_stop "${2:-}"
+            ;;
+        start-all)
+            load_grovefile
+            cmd_start_all "${2:-3}"
+            ;;
+        stop-all)
+            load_grovefile
+            cmd_stop_all
+            ;;
+        status)
+            load_grovefile
+            cmd_status
+            ;;
+        logs|attach)
+            load_grovefile
+            cmd_logs "${2:-}"
+            ;;
+        ports)
+            load_grovefile
+            cmd_ports
+            ;;
+        *)
+            # Default: treat argument as a branch name → create worktree + start
+            load_grovefile
+            cmd_worktree_add "$cmd" "${@:2}"
+            ;;
+    esac
+}
+
+main "$@"

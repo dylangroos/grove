@@ -1,0 +1,55 @@
+# Grovefile.example — Copy to your repo root as "Grovefile" and customize.
+#
+# This file is sourced by grove. Define project settings and hook functions.
+# All hooks are optional — implement only what you need.
+
+GROVE_PROJECT="myapp"       # tmux sessions: grove-myapp-0, grove-myapp-1, ...
+GROVE_MAX_INSTANCES=4       # Max parallel instances
+
+# ─── Port scheme ─────────────────────────────────────────────────────────────
+# Each instance gets isolated ports to avoid conflicts.
+
+grove_ports() {
+    local n="$1"
+    APP_PORT=$((3000 + n * 100))
+    UI_PORT=$((5173 + n * 100))
+}
+
+# ─── Setup (run when creating a new worktree) ────────────────────────────────
+
+grove_setup() {
+    npm install
+}
+
+# ─── tmux windows per instance ───────────────────────────────────────────────
+# Call grove_window <name> <command> for each window you want.
+
+grove_windows() {
+    local n="$1"
+
+    grove_window "server" "PORT=${APP_PORT} npm run dev"
+    grove_window "ui"     "cd frontend && PORT=${UI_PORT} npm run dev"
+}
+
+# ─── Health check ────────────────────────────────────────────────────────────
+# Return 0 if the instance is healthy. Used for status display and post-start wait.
+
+grove_health() {
+    curl -sf "http://localhost:${APP_PORT}/health" > /dev/null
+}
+
+# ─── Shared services (started once, used by all instances) ───────────────────
+# Call grove_ensure_service <name> <check_cmd> <start_cmd> for each service.
+
+grove_shared() {
+    grove_ensure_service "redis" \
+        "docker ps -f name=myapp-redis --format '{{.Names}}' | grep -q myapp-redis" \
+        "docker run -d --name myapp-redis -p 6379:6379 redis:7-alpine"
+}
+
+# ─── Post-start (run after instance is healthy) ─────────────────────────────
+
+grove_post_start() {
+    local n="$1"
+    echo "Instance $n ready at http://localhost:${APP_PORT}"
+}
