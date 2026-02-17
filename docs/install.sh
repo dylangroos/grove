@@ -30,7 +30,6 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
         echo "" >> "$PROFILE"
         echo "$EXPORT_LINE" >> "$PROFILE"
         echo "Added $INSTALL_DIR to PATH in $PROFILE"
+        echo "Restart your shell or run:  source $PROFILE"
     fi
-
-    export PATH="$INSTALL_DIR:$PATH"
 fi
