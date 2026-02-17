@@ -32,5 +32,7 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
         echo "Added $INSTALL_DIR to PATH in $PROFILE"
     fi
 
-    export PATH="$INSTALL_DIR:$PATH"
+    echo ""
+    echo "Run this to start using grove:"
+    echo "  source $PROFILE"
 fi
