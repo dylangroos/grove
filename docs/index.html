@@ -411,14 +411,28 @@
         <div class="feature-desc">Run grove feat/auth ten times — it creates what's missing, skips what exists, and prints status. Safe for scripts, CI, and agents.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Six commands</div>
-        <div class="feature-desc">grove, attach, ls, rm, help, version. One mental model. Nothing to memorize, nothing to configure.</div>
+        <div class="feature-title">Seven commands</div>
+        <div class="feature-desc">grove, attach, ls, rm, init, help, version. One mental model. Nothing to memorize, nothing to configure.</div>
       </div>
     </section>
 
     <h2 class="section-heading" id="grovefile">Configure with a Grovefile</h2>
     <div class="demo">
-<span class="comment"># Grovefile — drop in your repo root</span>
+<span class="prompt">$ </span><span class="cmd">grove init</span>
+<span class="output">Detected: node (pnpm)
+
+Setup (runs once per worktree, empty line to skip):
+  [pnpm install] >
+  >
+
+Windows (each gets a tmux window, empty line to skip):
+  [pnpm run dev] >
+  >
+
+&#10003; Created Grovefile</span></div>
+
+    <div class="demo">
+<span class="comment"># Grovefile — drop in your repo root, or run grove init</span>
 
 <span class="func">grove_setup</span>() {
     npm install

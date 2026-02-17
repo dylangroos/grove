@@ -31,6 +31,7 @@ grove attach <branch>        Attach to existing session
 grove ls                     List worktrees + session status
 grove rm <branch>            Kill session + remove worktree
 grove rm --all               Remove everything (with confirmation)
+grove init                   Generate a Grovefile interactively
 grove help                   Help
 grove version                Version
 ```
@@ -49,7 +50,9 @@ To get into the session: `grove attach <branch>` or `grove <branch> --attach`.
 
 ## Configuration
 
-Create a `Grovefile` at your repo root. It's entirely optional — grove works with zero config on any git repo.
+Run `grove init` to generate a Grovefile interactively — it auto-detects your project type and suggests defaults.
+
+Or create a `Grovefile` at your repo root manually. It's entirely optional — grove works with zero config on any git repo.
 
 ```bash
 # Grovefile
