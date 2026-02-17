@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Grove — Dev environments for humans and agents</title>
-  <meta name="description" content="Grove is a CLI tool combining tmux and git worktrees into seamless dev environments for humans and agents.">
+  <meta name="description" content="Grove is a parallel dev environment manager using git worktrees and tmux. Configured per-repo via a Grovefile.">
   <style>
     *, *::before, *::after {
       margin: 0;
@@ -312,46 +312,60 @@
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠉⠉⡉⠉⠁⠀⠀⠘⠓⠀⠀⠀⠀⠀⣀⣞⡿⡉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠹⣶⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀</div>
 
-      <h1 class="tagline">Dev environments for humans and agents</h1>
-      <p class="subtitle">A CLI tool that combines tmux sessions and git worktrees into seamless, isolated development environments.</p>
+      <h1 class="tagline">Parallel dev environments</h1>
+      <p class="subtitle">Manage multiple isolated development environments using git worktrees and tmux. Configured per-repo via a Grovefile.</p>
 
-      <div class="install-cmd" id="install" onclick="navigator.clipboard.writeText('brew install grove')">
-        <span class="prompt">$ </span>brew install grove
+      <div class="install-cmd" id="install" onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/dylangroos/grove/main/install.sh | bash')">
+        <span class="prompt">$ </span>curl -fsSL grove.wtf/install.sh | bash
       </div>
     </section>
 
     <section class="features" id="features">
       <div class="feature">
-        <div class="feature-title">tmux-powered workspaces</div>
-        <div class="feature-desc">Each environment gets its own tmux session. Switch between projects instantly. Never lose context.</div>
+        <div class="feature-title">Isolated instances</div>
+        <div class="feature-desc">Each instance gets its own git worktree, tmux session, and isolated ports. Work on multiple branches simultaneously without conflicts.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Git worktree management</div>
-        <div class="feature-desc">Automatic worktree creation and lifecycle. Work on multiple branches simultaneously without stashing.</div>
+        <div class="feature-title">Grovefile config</div>
+        <div class="feature-desc">Define your project with a single Grovefile — port schemes, tmux windows, shared services, health checks. Like a Makefile for dev environments.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Agent-ready environments</div>
-        <div class="feature-desc">Spin up isolated environments for AI agents. Each agent gets its own worktree, shell, and workspace.</div>
+        <div class="feature-title">Shared services</div>
+        <div class="feature-desc">Idempotently start databases, caches, and other shared services with grove_ensure_service. Start once, share across all instances.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Simple CLI</div>
-        <div class="feature-desc">One command to create, switch, and manage environments. No config files. No YAML. Just works.</div>
+        <div class="feature-title">One command</div>
+        <div class="feature-desc">grove feat/auth — creates the worktree, installs deps, starts services, and waits for healthy. grove rm feat/auth to tear it all down.</div>
       </div>
     </section>
 
     <div class="demo">
-<span class="prompt">$ </span><span class="cmd">grove new feature/auth</span>
-<span class="output">Creating worktree at .worktrees/feature-auth...
-Starting tmux session grove/feature-auth...
-Environment ready.</span>
+<span class="prompt">$ </span><span class="cmd">grove feat/auth-flow</span>
+<span class="output">Creating worktree: feat/auth-flow
+  Directory: .worktrees/feat-auth-flow
+  Assigned instance: 0
 
-<span class="prompt">$ </span><span class="cmd">grove list</span>
-<span class="output">  main            ~/project              (active)
-  feature/auth    ~/project/.worktrees/feature-auth
-  agent/refactor  ~/project/.worktrees/agent-refactor</span>
+Running setup...
 
-<span class="prompt">$ </span><span class="cmd">grove switch main</span>
-<span class="output">Switched to grove/main.</span></div>
+Shared services:
+  ✓ redis already running
+
+✓ Instance 0 started
+  Windows: server ui
+  Attach:  grove logs 0
+
+  ✓ Health check passed</span>
+
+<span class="prompt">$ </span><span class="cmd">grove ls</span>
+<span class="output">  DIRECTORY                       INST   BRANCH                         STATUS
+  feat-auth-flow                  0      feat/auth-flow                 healthy
+  agent-refactor                  1      agent/refactor                 running</span>
+
+<span class="prompt">$ </span><span class="cmd">grove rm feat/auth-flow</span>
+<span class="output">Stopping instance 0...
+✓ Instance 0 stopped
+Removing worktree: feat-auth-flow
+✓ Worktree removed: feat-auth-flow</span></div>
   </main>
 
   <footer>
