@@ -362,8 +362,78 @@ test_no_args() {
     cleanup
 }
 
+test_init_node_defaults() {
+    echo -e "${BOLD}15. init — node defaults${NC}"
+    setup_test_repo
+
+    # Create a Node.js project
+    echo '{"scripts":{"dev":"node server.js"}}' > "$TEST_DIR/package.json"
+
+    local output rc=0
+    output=$(printf '\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Detected:" "shows detected type"
+    assert_contains "$output" "Created Grovefile" "created message"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "npm install" "default setup command"
+    assert_contains "$grovefile" "npm run dev" "default window command"
+    assert_contains "$grovefile" "GROVE_PROJECT=" "project name set"
+
+    cleanup
+}
+
+test_init_custom_commands() {
+    echo -e "${BOLD}16. init — custom commands${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf 'make build\n\nmake run\n\n' | ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Created Grovefile" "created message"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "make build" "custom setup command"
+    assert_contains "$grovefile" "make run" "custom window command"
+
+    cleanup
+}
+
+test_init_already_exists() {
+    echo -e "${BOLD}17. init — already exists${NC}"
+    setup_test_repo
+
+    echo "# existing" > "$TEST_DIR/Grovefile"
+
+    local output rc=0
+    output=$(./grove init 2>&1) || rc=$?
+
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "already exists" "error message"
+
+    cleanup
+}
+
+test_init_not_in_git_repo() {
+    echo -e "${BOLD}18. init — not in git repo${NC}"
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+
+    local output rc=0
+    output=$(cd "$tmpdir" && "$GROVE_BIN" init 2>&1) || rc=$?
+
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "Not in a git repository" "error message"
+
+    rm -rf "$tmpdir"
+}
+
 test_unknown_flag() {
-    echo -e "${BOLD}15. unknown flag${NC}"
+    echo -e "${BOLD}19. unknown flag${NC}"
     setup_test_repo
 
     local output rc=0
@@ -404,6 +474,10 @@ main() {
     test_rm_nonexistent
     test_grovefile_with_windows
     test_no_args
+    test_init_node_defaults
+    test_init_custom_commands
+    test_init_already_exists
+    test_init_not_in_git_repo
     test_unknown_flag
 
     echo

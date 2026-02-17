@@ -355,6 +355,228 @@ cmd_rm_all() {
     echo -e "${GREEN}✓${NC} All worktrees removed"
 }
 
+# ─── Init ───────────────────────────────────────────────────────────────────
+
+detect_project() {
+    local dir="$1"
+    local type="unknown" setup="" window="" pm="npm"
+
+    # Detect Node.js package manager from lock files
+    if [[ -f "$dir/bun.lockb" ]] || [[ -f "$dir/bun.lock" ]]; then
+        pm="bun"
+    elif [[ -f "$dir/pnpm-lock.yaml" ]]; then
+        pm="pnpm"
+    elif [[ -f "$dir/yarn.lock" ]]; then
+        pm="yarn"
+    fi
+
+    if [[ -f "$dir/Cargo.toml" ]]; then
+        type="rust"
+        setup="cargo build"
+        window="cargo run"
+    elif [[ -f "$dir/go.mod" ]]; then
+        type="go"
+        setup="go build ./..."
+        window="go run ."
+    elif [[ -f "$dir/package.json" ]]; then
+        type="node ($pm)"
+        setup="$pm install"
+        # Check if "dev" script exists in package.json
+        if grep -q '"dev"' "$dir/package.json" 2>/dev/null; then
+            window="$pm run dev"
+        elif grep -q '"start"' "$dir/package.json" 2>/dev/null; then
+            window="$pm start"
+        fi
+    elif [[ -f "$dir/pyproject.toml" ]]; then
+        if [[ -f "$dir/uv.lock" ]]; then
+            type="python (uv)"
+            setup="uv sync"
+        else
+            type="python"
+            setup="pip install -e ."
+        fi
+    elif [[ -f "$dir/requirements.txt" ]]; then
+        type="python"
+        setup="pip install -r requirements.txt"
+    elif [[ -f "$dir/Gemfile" ]]; then
+        type="ruby"
+        setup="bundle install"
+        if [[ -f "$dir/bin/rails" ]]; then
+            window="bin/rails server"
+        fi
+    elif [[ -f "$dir/composer.json" ]]; then
+        type="php"
+        setup="composer install"
+        if [[ -f "$dir/artisan" ]]; then
+            window="php artisan serve"
+        fi
+    fi
+
+    echo "$type"
+    echo "$setup"
+    echo "$window"
+}
+
+window_name_from_cmd() {
+    local cmd="$1" index="$2"
+
+    # cd <dir> && ... → use <dir>
+    if [[ "$cmd" =~ ^cd[[:space:]]+([^[:space:]&]+)[[:space:]]*\&\& ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return
+    fi
+
+    # * run <name> → use <name>
+    if [[ "$cmd" =~ [[:space:]]run[[:space:]]+([^[:space:]]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return
+    fi
+
+    # * start → "start"
+    if [[ "$cmd" =~ [[:space:]]start$ ]] || [[ "$cmd" =~ ^[^[:space:]]+[[:space:]]start$ ]]; then
+        echo "start"
+        return
+    fi
+
+    echo "window-$index"
+}
+
+cmd_init() {
+    if ! find_grove_root; then
+        echo -e "${RED}Error:${NC} Not in a git repository" >&2
+        exit 1
+    fi
+
+    if [[ -f "$GROVE_ROOT/Grovefile" ]]; then
+        echo -e "${RED}Error:${NC} Grovefile already exists" >&2
+        exit 1
+    fi
+
+    local project_name
+    project_name="$(basename "$GROVE_ROOT")"
+
+    # Detect project type
+    local detection type default_setup default_window
+    detection="$(detect_project "$GROVE_ROOT")"
+    type="$(echo "$detection" | sed -n '1p')"
+    default_setup="$(echo "$detection" | sed -n '2p')"
+    default_window="$(echo "$detection" | sed -n '3p')"
+
+    if [[ "$type" != "unknown" ]]; then
+        echo -e "Detected: ${BOLD}${type}${NC}"
+    fi
+    echo
+
+    # ── Collect setup commands ──
+    local setup_cmds=()
+    local first=true
+
+    echo -e "${BOLD}Setup${NC} (runs once per worktree, empty line to skip):"
+
+    while true; do
+        if $first; then
+            printf "  [%s] > " "$default_setup"
+            first=false
+            local line
+            IFS= read -r line || break
+            if [[ -z "$line" ]]; then
+                # Accept default
+                if [[ -n "$default_setup" ]]; then
+                    setup_cmds+=("$default_setup")
+                fi
+                break
+            else
+                setup_cmds+=("$line")
+            fi
+        else
+            printf "  > "
+            local line
+            IFS= read -r line || break
+            if [[ -z "$line" ]]; then
+                break
+            fi
+            setup_cmds+=("$line")
+        fi
+    done
+
+    echo
+
+    # ── Collect window commands ──
+    local window_cmds=()
+    first=true
+
+    echo -e "${BOLD}Windows${NC} (each gets a tmux window, empty line to skip):"
+
+    while true; do
+        if $first; then
+            printf "  [%s] > " "$default_window"
+            first=false
+            local line
+            IFS= read -r line || break
+            if [[ -z "$line" ]]; then
+                if [[ -n "$default_window" ]]; then
+                    window_cmds+=("$default_window")
+                fi
+                break
+            else
+                window_cmds+=("$line")
+            fi
+        else
+            printf "  > "
+            local line
+            IFS= read -r line || break
+            if [[ -z "$line" ]]; then
+                break
+            fi
+            window_cmds+=("$line")
+        fi
+    done
+
+    echo
+
+    # ── Generate Grovefile ──
+    local grovefile=""
+    grovefile+="GROVE_PROJECT=\"${project_name}\""
+    grovefile+=$'\n'
+
+    if [[ ${#setup_cmds[@]} -gt 0 ]]; then
+        grovefile+=$'\n'
+        grovefile+="grove_setup() {"
+        grovefile+=$'\n'
+        for cmd in "${setup_cmds[@]}"; do
+            grovefile+="    ${cmd}"
+            grovefile+=$'\n'
+        done
+        grovefile+="}"
+        grovefile+=$'\n'
+    fi
+
+    if [[ ${#window_cmds[@]} -gt 0 ]]; then
+        grovefile+=$'\n'
+        grovefile+="grove_windows() {"
+        grovefile+=$'\n'
+        local i=1
+        for cmd in "${window_cmds[@]}"; do
+            local wname
+            wname="$(window_name_from_cmd "$cmd" "$i")"
+            grovefile+="    grove_window \"${wname}\" \"${cmd}\""
+            grovefile+=$'\n'
+            i=$((i + 1))
+        done
+        grovefile+="}"
+        grovefile+=$'\n'
+    fi
+
+    printf '%s' "$grovefile" > "$GROVE_ROOT/Grovefile"
+
+    echo -e "${GREEN}✓${NC} Created Grovefile"
+    echo
+    # Display the generated Grovefile indented
+    while IFS= read -r line; do
+        echo "  $line"
+    done < "$GROVE_ROOT/Grovefile"
+}
+
 cmd_completions() {
     cat <<'COMP'
 # grove shell completions — add to .bashrc or .zshrc:
@@ -373,7 +595,7 @@ _grove_completions() {
             fi
             ;;
         grove)
-            local subcmds="ls rm attach help version completions"
+            local subcmds="ls rm attach init help version completions"
             local branches=""
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
@@ -407,6 +629,7 @@ $(echo -e "${BOLD}USAGE:${NC}")
   grove rm --all               Remove everything (with confirmation)
 
 $(echo -e "${BOLD}OTHER:${NC}")
+  grove init                   Generate a Grovefile interactively
   grove help                   Show this help
   grove version                Show version
   grove completions            Output shell completions
@@ -450,6 +673,9 @@ main() {
             ;;
         completions)
             cmd_completions
+            ;;
+        init)
+            cmd_init
             ;;
         *)
             load_grovefile
