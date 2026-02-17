@@ -96,7 +96,7 @@ load_grovefile() {
 
 slugify_branch() {
     echo "$1" \
-        | sed 's/\//-/g; s/[^a-zA-Z0-9._-]/-/g' \
+        | sed 's/\//-/g; s/[^a-zA-Z0-9_-]/-/g' \
         | sed 's/--*/-/g; s/^-//; s/-$//' \
         | cut -c1-50
 }
