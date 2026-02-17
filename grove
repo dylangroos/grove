@@ -132,13 +132,26 @@ cmd_open() {
 
         echo -e "${BOLD}Creating worktree:${NC} $branch"
 
+        local git_output
         if git -C "$GROVE_ROOT" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-            git -C "$GROVE_ROOT" worktree add "$wt_dir" "$branch"
+            git_output=$(git -C "$GROVE_ROOT" worktree add "$wt_dir" "$branch" 2>&1) || {
+                echo -e "${RED}Error:${NC} Failed to create worktree for '$branch'" >&2
+                echo -e "  ${DIM}${git_output}${NC}" >&2
+                exit 1
+            }
         elif git -C "$GROVE_ROOT" show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
-            git -C "$GROVE_ROOT" worktree add --track -b "$branch" "$wt_dir" "origin/$branch"
+            git_output=$(git -C "$GROVE_ROOT" worktree add --track -b "$branch" "$wt_dir" "origin/$branch" 2>&1) || {
+                echo -e "${RED}Error:${NC} Failed to create worktree for '$branch'" >&2
+                echo -e "  ${DIM}${git_output}${NC}" >&2
+                exit 1
+            }
         else
             echo -e "  ${DIM}Branch '$branch' not found, creating from current HEAD${NC}"
-            git -C "$GROVE_ROOT" worktree add -b "$branch" "$wt_dir"
+            git_output=$(git -C "$GROVE_ROOT" worktree add -b "$branch" "$wt_dir" 2>&1) || {
+                echo -e "${RED}Error:${NC} Failed to create worktree for '$branch'" >&2
+                echo -e "  ${DIM}${git_output}${NC}" >&2
+                exit 1
+            }
         fi
 
         # Copy .env if it exists in the main repo
