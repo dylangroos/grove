@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Grove — Dev environments for humans and agents</title>
-  <meta name="description" content="Grove is a parallel dev environment manager using git worktrees and tmux. Configured per-repo via a Grovefile.">
+  <meta name="description" content="Grove is the fastest way to branch off, work in isolation, and clean up. Git worktrees + tmux, nothing more.">
   <style>
     *, *::before, *::after {
       margin: 0;
@@ -312,8 +312,8 @@
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠉⠉⡉⠉⠁⠀⠀⠘⠓⠀⠀⠀⠀⠀⣀⣞⡿⡉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠹⣶⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀</div>
 
-      <h1 class="tagline">Parallel dev environments</h1>
-      <p class="subtitle">Manage multiple isolated development environments using git worktrees and tmux. Configured per-repo via a Grovefile.</p>
+      <h1 class="tagline">Branch off. Work in isolation. Clean up.</h1>
+      <p class="subtitle">Git worktrees + tmux. Branch name in, environment out. No config required.</p>
 
       <div class="install-cmd" id="install" onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/dylangroos/grove/main/install.sh | bash')">
         <span class="prompt">$ </span>curl -fsSL grove.wtf/install.sh | bash
@@ -322,50 +322,43 @@
 
     <section class="features" id="features">
       <div class="feature">
-        <div class="feature-title">Isolated instances</div>
-        <div class="feature-desc">Each instance gets its own git worktree, tmux session, and isolated ports. Work on multiple branches simultaneously without conflicts.</div>
+        <div class="feature-title">Branch = environment</div>
+        <div class="feature-desc">grove feat/auth creates a worktree and tmux session. Branch name in, isolated environment out. No instance numbers, no slot management.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Grovefile config</div>
-        <div class="feature-desc">Define your project with a single Grovefile — port schemes, tmux windows, shared services, health checks. Like a Makefile for dev environments.</div>
+        <div class="feature-title">Zero config</div>
+        <div class="feature-desc">Works on any git repo with no setup. Add a Grovefile for setup hooks and tmux windows when you want them.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Shared services</div>
-        <div class="feature-desc">Idempotently start databases, caches, and other shared services with grove_ensure_service. Start once, share across all instances.</div>
+        <div class="feature-title">Idempotent</div>
+        <div class="feature-desc">Run grove feat/auth ten times — it creates what's missing, skips what exists, and prints status. Safe for scripts, CI, and agents.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">One command</div>
-        <div class="feature-desc">grove feat/auth — creates the worktree, installs deps, starts services, and waits for healthy. grove rm feat/auth to tear it all down.</div>
+        <div class="feature-title">Six commands</div>
+        <div class="feature-desc">grove, attach, ls, rm, help, version. One mental model. Nothing to memorize, nothing to configure.</div>
       </div>
     </section>
 
     <div class="demo">
 <span class="prompt">$ </span><span class="cmd">grove feat/auth-flow</span>
 <span class="output">Creating worktree: feat/auth-flow
-  Directory: .worktrees/feat-auth-flow
-  Assigned instance: 0
+  Branch 'feat/auth-flow' not found, creating from current HEAD
 
 Running setup...
 
-Shared services:
-  ✓ redis already running
-
-✓ Instance 0 started
-  Windows: server ui
-  Attach:  grove logs 0
-
-  ✓ Health check passed</span>
+✓ Worktree created: .worktrees/feat-auth-flow
+✓ Session started: grove-myapp-feat-auth-flow
+  Attach: grove attach feat/auth-flow</span>
 
 <span class="prompt">$ </span><span class="cmd">grove ls</span>
-<span class="output">  DIRECTORY                       INST   BRANCH                         STATUS
-  feat-auth-flow                  0      feat/auth-flow                 healthy
-  agent-refactor                  1      agent/refactor                 running</span>
+<span class="output">BRANCH                         SESSION
+feat/auth-flow                 detached
+fix/login-bug                  attached
+refactor/api                   -</span>
 
 <span class="prompt">$ </span><span class="cmd">grove rm feat/auth-flow</span>
-<span class="output">Stopping instance 0...
-✓ Instance 0 stopped
-Removing worktree: feat-auth-flow
-✓ Worktree removed: feat-auth-flow</span></div>
+<span class="output">Session killed: grove-myapp-feat-auth-flow
+✓ Removed: feat-auth-flow</span></div>
   </main>
 
   <footer>
