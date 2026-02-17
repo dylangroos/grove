@@ -186,7 +186,7 @@ cmd_open() {
             tmux send-keys -t "$session:${_GROVE_WINDOWS[0]}" "${_GROVE_WINDOW_CMDS[0]}" C-m
 
             # Create remaining windows
-            for i in $(seq 1 $((${#_GROVE_WINDOWS[@]} - 1))); do
+            for ((i = 1; i < ${#_GROVE_WINDOWS[@]}; i++)); do
                 tmux new-window -t "$session" -n "${_GROVE_WINDOWS[$i]}" -c "$wt_dir"
                 tmux send-keys -t "$session:${_GROVE_WINDOWS[$i]}" "${_GROVE_WINDOW_CMDS[$i]}" C-m
             done
@@ -417,6 +417,16 @@ detect_project() {
     echo "$window"
 }
 
+detect_agent() {
+    if command -v claude >/dev/null 2>&1; then
+        echo "claude --dangerously-skip-permissions"
+    elif command -v codex >/dev/null 2>&1; then
+        echo "codex"
+    elif command -v aider >/dev/null 2>&1; then
+        echo "aider"
+    fi
+}
+
 window_name_from_cmd() {
     local cmd="$1" index="$2"
 
@@ -534,6 +544,25 @@ cmd_init() {
 
     echo
 
+    # ── Collect agent command ──
+    local default_agent agent_cmd=""
+    default_agent="$(detect_agent)"
+
+    echo -e "${BOLD}Agent${NC} (runs in its own window, empty line to skip):"
+    printf "  [%s] > " "$default_agent"
+    local agent_line
+    if IFS= read -r agent_line; then
+        if [[ -z "$agent_line" ]]; then
+            if [[ -n "$default_agent" ]]; then
+                agent_cmd="$default_agent"
+            fi
+        else
+            agent_cmd="$agent_line"
+        fi
+    fi
+
+    echo
+
     # ── Generate Grovefile ──
     local grovefile=""
     grovefile+="GROVE_PROJECT=\"${project_name}\""
@@ -551,18 +580,24 @@ cmd_init() {
         grovefile+=$'\n'
     fi
 
-    if [[ ${#window_cmds[@]} -gt 0 ]]; then
+    if [[ ${#window_cmds[@]} -gt 0 || -n "$agent_cmd" ]]; then
         grovefile+=$'\n'
         grovefile+="grove_windows() {"
         grovefile+=$'\n'
-        local i=1
-        for cmd in "${window_cmds[@]}"; do
-            local wname
-            wname="$(window_name_from_cmd "$cmd" "$i")"
-            grovefile+="    grove_window \"${wname}\" \"${cmd}\""
+        if [[ ${#window_cmds[@]} -gt 0 ]]; then
+            local i=1
+            for cmd in "${window_cmds[@]}"; do
+                local wname
+                wname="$(window_name_from_cmd "$cmd" "$i")"
+                grovefile+="    grove_window \"${wname}\" \"${cmd}\""
+                grovefile+=$'\n'
+                i=$((i + 1))
+            done
+        fi
+        if [[ -n "$agent_cmd" ]]; then
+            grovefile+="    grove_window \"agent\" \"${agent_cmd}\""
             grovefile+=$'\n'
-            i=$((i + 1))
-        done
+        fi
         grovefile+="}"
         grovefile+=$'\n'
     fi
