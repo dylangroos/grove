@@ -429,6 +429,9 @@ Windows (each gets a tmux window, empty line to skip):
   [pnpm run dev] >
   >
 
+Agent (runs in its own window, empty line to skip):
+  [claude --dangerously-skip-permissions] >
+
 &#10003; Created Grovefile</span></div>
 
     <div class="demo">
@@ -441,6 +444,7 @@ Windows (each gets a tmux window, empty line to skip):
 <span class="func">grove_windows</span>() {
     grove_window <span class="string">"server"</span> <span class="string">"npm run dev"</span>
     grove_window <span class="string">"ui"</span>     <span class="string">"cd frontend && npm run dev"</span>
+    grove_window <span class="string">"agent"</span>  <span class="string">"claude --dangerously-skip-permissions"</span>
 }</div>
 
     <div class="demo">

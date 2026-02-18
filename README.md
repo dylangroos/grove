@@ -50,7 +50,7 @@ To get into the session: `grove attach <branch>` or `grove <branch> --attach`.
 
 ## Configuration
 
-Run `grove init` to generate a Grovefile interactively — it auto-detects your project type and suggests defaults.
+Run `grove init` to generate a Grovefile interactively — it auto-detects your project type, installed coding agents (Claude, Codex, aider), and suggests defaults.
 
 Or create a `Grovefile` at your repo root manually. It's entirely optional — grove works with zero config on any git repo.
 
@@ -65,6 +65,7 @@ grove_setup() {              # runs once after worktree creation
 grove_windows() {            # define tmux windows
     grove_window "server" "npm run dev"
     grove_window "ui" "cd frontend && npm run dev"
+    grove_window "agent" "claude --dangerously-skip-permissions"
 }
 ```
 

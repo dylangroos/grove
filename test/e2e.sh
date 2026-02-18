@@ -736,8 +736,87 @@ test_init_not_in_git_repo() {
     rm -rf "$tmpdir"
 }
 
+# ─── Init: agent detection ────────────────────────────────────────
+
+test_agent_detected() {
+    echo -e "${BOLD}37. agent — detected (accept default)${NC}"
+    setup_test_repo
+
+    mkdir -p "$TEST_DIR/bin"
+    printf '#!/bin/sh\n' > "$TEST_DIR/bin/claude"
+    chmod +x "$TEST_DIR/bin/claude"
+
+    local output rc=0
+    output=$(printf '\n\n\n' | PATH="$TEST_DIR/bin:$PATH" ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" 'grove_window "agent" "claude --dangerously-skip-permissions"' "agent window with default command"
+
+    cleanup
+}
+
+test_agent_custom() {
+    echo -e "${BOLD}38. agent — custom command${NC}"
+    setup_test_repo
+
+    mkdir -p "$TEST_DIR/bin"
+    printf '#!/bin/sh\n' > "$TEST_DIR/bin/claude"
+    chmod +x "$TEST_DIR/bin/claude"
+
+    local output rc=0
+    output=$(printf '\n\naider --model gpt-4\n' | PATH="$TEST_DIR/bin:$PATH" ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" 'grove_window "agent" "aider --model gpt-4"' "agent window with custom command"
+
+    cleanup
+}
+
+test_agent_skipped() {
+    echo -e "${BOLD}39. agent — skipped (no agent in PATH)${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(printf '\n\n\n' | PATH="/usr/bin:/bin" ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_not_contains "$grovefile" "agent" "no agent in Grovefile"
+
+    cleanup
+}
+
+test_agent_only() {
+    echo -e "${BOLD}40. agent — only (no other windows)${NC}"
+    setup_test_repo
+
+    mkdir -p "$TEST_DIR/bin"
+    printf '#!/bin/sh\n' > "$TEST_DIR/bin/claude"
+    chmod +x "$TEST_DIR/bin/claude"
+
+    local output rc=0
+    output=$(printf '\n\n\n' | PATH="$TEST_DIR/bin:$PATH" ./grove init 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+
+    local grovefile
+    grovefile="$(cat "$TEST_DIR/Grovefile")"
+    assert_contains "$grovefile" "grove_windows" "has windows section"
+    assert_contains "$grovefile" 'grove_window "agent" "claude --dangerously-skip-permissions"' "agent is the only window"
+
+    cleanup
+}
+
 test_unknown_flag() {
-    echo -e "${BOLD}36. unknown flag${NC}"
+    echo -e "${BOLD}41. unknown flag${NC}"
     setup_test_repo
 
     local output rc=0
@@ -803,6 +882,11 @@ main() {
     test_init_custom_commands
     test_init_already_exists
     test_init_not_in_git_repo
+    # Init: agent detection
+    test_agent_detected
+    test_agent_custom
+    test_agent_skipped
+    test_agent_only
     test_unknown_flag
 
     echo
