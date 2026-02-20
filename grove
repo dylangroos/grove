@@ -110,6 +110,7 @@ detect_agent_name() {
 build_agent_cmd() {
     local agent="$1"
     local prompt="${2:-}"
+    local continue_mode="${3:-}"
 
     if [[ -z "$agent" ]]; then
         return 1
@@ -117,14 +118,22 @@ build_agent_cmd() {
 
     if [[ -n "$prompt" ]]; then
         case "$agent" in
-            claude) echo "claude --dangerously-skip-permissions \"$prompt\"" ;;
+            claude)
+                local cmd="claude --dangerously-skip-permissions"
+                [[ -n "$continue_mode" ]] && cmd="$cmd --continue"
+                echo "$cmd \"$prompt\""
+                ;;
             codex)  echo "codex \"$prompt\"" ;;
             aider)  echo "aider --message \"$prompt\"" ;;
             *)      echo "$agent \"$prompt\"" ;;
         esac
     else
         case "$agent" in
-            claude) echo "claude --dangerously-skip-permissions" ;;
+            claude)
+                local cmd="claude --dangerously-skip-permissions"
+                [[ -n "$continue_mode" ]] && cmd="$cmd --continue"
+                echo "$cmd"
+                ;;
             *)      echo "$agent" ;;
         esac
     fi
@@ -146,10 +155,48 @@ grove_prompt_path() {
 }
 
 is_agent_running() {
-    local wt_dir="$1"
+    local wt_dir="${1%/}"
     local socket
     socket="$(grove_socket_path "$wt_dir")"
-    [[ -S "$socket" ]]
+    [[ -S "$socket" ]] || return 1
+    # Verify dtach process is alive; clean up stale socket
+    if command -v lsof >/dev/null 2>&1; then
+        local pid
+        pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$socket"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+get_agent_status() {
+    local wt_dir="${1%/}"
+    if ! is_agent_running "$wt_dir"; then
+        echo "done"; return 0
+    fi
+    local log_file
+    log_file="$(grove_log_path "$wt_dir")"
+    if [[ ! -f "$log_file" ]]; then
+        echo "running"; return 0
+    fi
+    local now log_mtime age
+    now="$(date +%s)"
+    log_mtime="$(stat -c %Y "$log_file" 2>/dev/null)" || log_mtime=0
+    age=$((now - log_mtime))
+    if [[ "$age" -le 10 ]]; then
+        echo "running"
+    else
+        echo "waiting"
+    fi
+}
+
+has_prior_session() {
+    local wt_dir="${1%/}"
+    local log_file
+    log_file="$(grove_log_path "$wt_dir")"
+    [[ -s "$log_file" ]]
 }
 
 kill_agent() {
@@ -198,14 +245,20 @@ format_duration() {
 
 get_last_activity() {
     local wt_dir="$1"
-    local timestamp subject
+    local base_file="$wt_dir/.grove-base-commit"
 
+    # If base commit recorded, skip if no agent commits yet
+    if [[ -f "$base_file" ]]; then
+        local base head
+        base="$(cat "$base_file")"
+        head="$(cd "$wt_dir" && git rev-parse HEAD 2>/dev/null)" || return 1
+        [[ "$head" != "$base" ]] || return 1
+    fi
+
+    local timestamp subject
     timestamp="$(cd "$wt_dir" && git log -1 --format='%ct' 2>/dev/null)" || return 1
     subject="$(cd "$wt_dir" && git log -1 --format='%s' 2>/dev/null)" || return 1
-
-    if [[ -z "$timestamp" ]]; then
-        return 1
-    fi
+    [[ -n "$timestamp" ]] || return 1
 
     local now elapsed duration
     now="$(date +%s)"
@@ -213,6 +266,29 @@ get_last_activity() {
     duration="$(format_duration "$elapsed")"
 
     echo "${duration} · \"${subject}\""
+}
+
+get_log_activity() {
+    local wt_dir="${1%/}"
+    local log_file
+    log_file="$(grove_log_path "$wt_dir")"
+    [[ -s "$log_file" ]] || return 1
+
+    local line
+    line="$(tail -20 "$log_file" \
+        | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' \
+        | tr -d '\r' \
+        | LC_ALL=C tr -cd ' -~\n' \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+        | grep '[a-zA-Z]' \
+        | tail -1)"
+    [[ -n "$line" ]] || return 1
+
+    # Truncate to 60 chars for status display
+    if [[ ${#line} -gt 60 ]]; then
+        line="${line:0:57}..."
+    fi
+    echo "$line"
 }
 
 get_diff_stat() {
@@ -296,6 +372,9 @@ cmd_checkout() {
             fi
         fi
 
+        # Record base commit so status can distinguish inherited vs agent commits
+        git -C "$wt_dir" rev-parse HEAD > "$wt_dir/.grove-base-commit"
+
         echo -e "${GREEN}✓${NC} Worktree created: $wt_dir"
     fi
 
@@ -310,13 +389,6 @@ cmd_checkout() {
         return 0
     fi
 
-    # Check if agent is already running
-    if is_agent_running "$wt_dir"; then
-        echo -e "Agent already running in ${BOLD}$branch${NC}"
-        echo -e "  Attach: ${DIM}gr attach $branch${NC}"
-        return 0
-    fi
-
     local socket log_file
     socket="$(grove_socket_path "$wt_dir")"
     log_file="$(grove_log_path "$wt_dir")"
@@ -326,12 +398,52 @@ cmd_checkout() {
         echo "$prompt" > "$(grove_prompt_path "$wt_dir")"
     fi
 
+    local agent_status
+    agent_status="$(get_agent_status "$wt_dir")"
+
+    # ── Agent already running ──
+    if [[ "$agent_status" != "done" ]]; then
+        if [[ -z "$prompt" ]]; then
+            # No prompt → auto-attach
+            if [[ -t 0 ]]; then
+                echo -e "Attaching to agent in ${BOLD}$branch${NC}"
+                echo -e "  ${DIM}Detach with Ctrl+\\${NC}"
+                exec dtach -a "$socket" -z
+            else
+                echo -e "Agent running in ${BOLD}$branch${NC}"
+                echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+                return 0
+            fi
+        elif [[ "$agent_status" == "waiting" ]]; then
+            # Idle agent + new prompt → kill and restart with --continue
+            kill_agent "$wt_dir"
+            local agent_cmd
+            agent_cmd="$(build_agent_cmd "$agent" "$prompt" "continue")"
+            dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+            echo -e "${GREEN}✓${NC} Agent restarted with --continue (background): ${BOLD}$agent${NC}"
+            echo -e "  Prompt: ${DIM}\"$prompt\"${NC}"
+            echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+            return 0
+        else
+            # Agent actively working + new prompt → warn
+            echo -e "${YELLOW}Agent is busy${NC} in ${BOLD}$branch${NC}"
+            echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+            return 0
+        fi
+    fi
+
+    # ── Agent not running — start fresh or continue ──
+    local continue_flag=""
+    if has_prior_session "$wt_dir"; then
+        continue_flag="continue"
+    fi
+
     local agent_cmd
-    agent_cmd="$(build_agent_cmd "$agent" "$prompt")"
+    agent_cmd="$(build_agent_cmd "$agent" "$prompt" "$continue_flag")"
 
     if [[ -n "$prompt" ]]; then
         # Background mode: dtach -n (no attach)
-        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && $agent_cmd" > "$log_file" 2>&1
+        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
         echo -e "${GREEN}✓${NC} Agent started (background): ${BOLD}$agent${NC}"
         echo -e "  Prompt: ${DIM}\"$prompt\"${NC}"
         echo -e "  Attach: ${DIM}gr attach $branch${NC}"
@@ -339,10 +451,10 @@ cmd_checkout() {
         # Foreground mode: dtach -c (create and attach, needs TTY)
         echo -e "${GREEN}✓${NC} Starting agent: ${BOLD}$agent${NC}"
         echo -e "  ${DIM}Detach with Ctrl+\\${NC}"
-        dtach -c "$socket" -z bash -c "cd \"$wt_dir\" && $agent_cmd" 2> "$log_file"
+        dtach -c "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
     else
         # No TTY available — fall back to background
-        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && $agent_cmd" > "$log_file" 2>&1
+        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
         echo -e "${GREEN}✓${NC} Agent started (background): ${BOLD}$agent${NC}"
         echo -e "  Attach: ${DIM}gr attach $branch${NC}"
     fi
@@ -379,18 +491,25 @@ cmd_status_single() {
     agent_name="${agent_name:-—}"
 
     # Status
-    if is_agent_running "$wt_dir"; then
-        status_str="${GREEN}running${NC}"
-    else
-        status_str="${DIM}done${NC}"
-    fi
+    local agent_status
+    agent_status="$(get_agent_status "$wt_dir")"
+    case "$agent_status" in
+        running) status_str="${GREEN}running${NC}" ;;
+        waiting) status_str="${YELLOW}waiting${NC}" ;;
+        *)       status_str="${DIM}done${NC}" ;;
+    esac
 
     # Last activity
     activity="$(get_last_activity "$wt_dir" 2>/dev/null)" || activity=""
 
     # If done, try to show diff stat instead
-    if ! is_agent_running "$wt_dir" && [[ -z "$activity" ]]; then
+    if [[ "$agent_status" == "done" ]] && [[ -z "$activity" ]]; then
         activity=""
+    fi
+
+    # Try agent log output
+    if [[ -z "$activity" ]]; then
+        activity="$(get_log_activity "$wt_dir" 2>/dev/null)" || activity=""
     fi
 
     # Prompt info
@@ -499,6 +618,32 @@ cmd_diff() {
     (cd "$wt_dir" && git diff "$base"..HEAD)
 }
 
+cmd_output() {
+    local branch="${1:-}"
+    if [[ -z "$branch" ]]; then
+        echo -e "${RED}Error:${NC} Missing branch name" >&2
+        echo "Usage: gr output <branch>" >&2
+        exit 1
+    fi
+
+    local slug wt_dir log_file
+    slug="$(slugify_branch "$branch")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} No worktree for '$branch'" >&2
+        exit 1
+    fi
+
+    log_file="$(grove_log_path "$wt_dir")"
+    if [[ ! -s "$log_file" ]]; then
+        echo -e "${DIM}No output yet${NC}"
+        return 0
+    fi
+
+    cat "$log_file"
+}
+
 cmd_rm() {
     local branch="${1:-}"
 
@@ -540,8 +685,16 @@ cmd_rm() {
     fi
 
     # Remove worktree
+    local wt_branch
+    wt_branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
     git -C "$GROVE_ROOT" worktree remove "$wt_dir" --force 2>/dev/null || rm -rf "$wt_dir"
     git -C "$GROVE_ROOT" worktree prune 2>/dev/null || true
+
+    # Clean up the branch if it's not checked out elsewhere
+    if [[ -n "$wt_branch" && "$wt_branch" != "HEAD" ]]; then
+        git -C "$GROVE_ROOT" branch -D "$wt_branch" 2>/dev/null || true
+    fi
+
     echo -e "${GREEN}✓${NC} Removed: $slug"
 }
 
@@ -566,16 +719,26 @@ cmd_rm_all() {
         return 0
     fi
 
+    local branches_to_delete=()
     for wt_dir in "$wt_base"/*/; do
         [[ -d "$wt_dir" ]] || continue
-        local slug
+        local slug wt_branch
         slug="$(basename "$wt_dir")"
+        wt_branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
+        if [[ -n "$wt_branch" && "$wt_branch" != "HEAD" ]]; then
+            branches_to_delete+=("$wt_branch")
+        fi
 
         kill_agent "$wt_dir"
         git -C "$GROVE_ROOT" worktree remove "$wt_dir" --force 2>/dev/null || rm -rf "$wt_dir"
     done
 
     git -C "$GROVE_ROOT" worktree prune 2>/dev/null || true
+
+    for br in "${branches_to_delete[@]}"; do
+        git -C "$GROVE_ROOT" branch -D "$br" 2>/dev/null || true
+    done
+
     echo -e "${GREEN}✓${NC} All worktrees removed"
 }
 
@@ -731,7 +894,7 @@ _grove_completions() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     case "$prev" in
-        attach|rm|log|diff|checkout|co)
+        attach|rm|log|diff|output|checkout|co)
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
             if [[ -d "$wt_base" ]]; then
@@ -748,7 +911,7 @@ _grove_completions() {
             fi
             ;;
         grove|gr)
-            local subcmds="checkout status log diff rm attach init help version completions"
+            local subcmds="checkout status log diff output rm attach init help version completions"
             local branches=""
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
@@ -782,6 +945,7 @@ $(echo -e "${BOLD}USAGE:${NC}")
   gr attach <branch>              Snap into a running agent session
   gr log <branch>                 Agent's commits on this branch
   gr diff <branch>                What the agent changed vs base
+  gr output <branch>              Show agent's terminal output
   gr rm <branch>                  Kill agent + remove worktree
   gr rm --all                     Remove everything (with confirmation)
 
@@ -844,6 +1008,10 @@ main() {
         diff)
             load_grovefile
             cmd_diff "${2:-}"
+            ;;
+        output)
+            load_grovefile
+            cmd_output "${2:-}"
             ;;
         rm|remove)
             load_grovefile

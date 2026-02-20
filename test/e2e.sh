@@ -224,7 +224,7 @@ test_checkout_idempotency() {
     output=$(PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "test again" 2>&1) || rc=$?
 
     assert_exit 0 "$rc" "exit code"
-    assert_contains "$output" "Agent already running" "reports agent already running"
+    assert_contains "$output" "Agent is busy" "reports agent is busy"
     assert_contains "$output" "gr attach" "suggests attach command"
 
     cleanup
@@ -674,6 +674,80 @@ test_completions() {
     cleanup
 }
 
+test_checkout_auto_attach() {
+    echo -e "${BOLD}29. checkout auto-attaches to running agent${NC}"
+    setup_test_repo
+
+    PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "test" >/dev/null 2>&1
+    sleep 0.5
+
+    # Checkout with no prompt (no TTY) should print attach hint
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Agent running in" "reports agent running"
+    assert_contains "$output" "gr attach" "suggests attach"
+
+    cleanup
+}
+
+test_status_shows_waiting() {
+    echo -e "${BOLD}30. status shows waiting for idle agent${NC}"
+    setup_test_repo
+
+    PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "test" >/dev/null 2>&1
+    sleep 0.5
+
+    # Backdate log file to simulate idle agent
+    local log_file="$TEST_DIR/.worktrees/feat-auth/.grove-agent.log"
+    touch -d "1 minute ago" "$log_file" 2>/dev/null || touch -t "$(date -d '1 minute ago' +%Y%m%d%H%M.%S)" "$log_file" 2>/dev/null
+
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "waiting" "shows waiting status"
+
+    cleanup
+}
+
+test_checkout_continue_after_done() {
+    echo -e "${BOLD}31. checkout with prompt after agent done restarts${NC}"
+    setup_test_repo
+
+    PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "first task" >/dev/null 2>&1
+    sleep 0.5
+
+    # Kill the agent to simulate completion
+    local socket="$TEST_DIR/.worktrees/feat-auth/.grove-socket"
+    if [[ -S "$socket" ]]; then
+        local pid
+        pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        if [[ -n "$pid" ]]; then
+            kill "$pid" 2>/dev/null || true
+            sleep 0.5
+        fi
+        rm -f "$socket"
+    fi
+
+    # Now checkout with a new prompt — should restart
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "second task" 2>&1) || rc=$?
+
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Agent started (background)" "agent restarted"
+    assert_contains "$output" "second task" "new prompt echoed"
+
+    # Verify socket exists (agent running again)
+    sleep 0.5
+    [[ -S "$TEST_DIR/.worktrees/feat-auth/.grove-socket" ]] \
+        && pass "dtach socket exists after restart" \
+        || fail "dtach socket exists after restart"
+
+    cleanup
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 main() {
@@ -722,6 +796,9 @@ main() {
     test_diff_shows_changes
     test_no_agent_configured
     test_completions
+    test_checkout_auto_attach
+    test_status_shows_waiting
+    test_checkout_continue_after_done
 
     # Restore ~/.grove
     if [[ -n "$SAVED_GROVE_CONFIG" ]]; then
