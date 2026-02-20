@@ -429,12 +429,12 @@ test_dots_in_branch_names() {
     cleanup
 }
 
-test_failed_grove_setup() {
-    echo -e "${BOLD}17. failed grove_setup${NC}"
+test_failed_setup() {
+    echo -e "${BOLD}17. failed setup${NC}"
     setup_test_repo
 
     cat > "$TEST_DIR/Grovefile" <<'GROVEFILE'
-grove_setup() { false; }
+setup() { false; }
 GROVEFILE
 
     rm -f "$HOME/.grove"
@@ -442,7 +442,7 @@ GROVEFILE
     output=$(./grove checkout feat/fail-setup 2>&1) || rc=$?
 
     assert_exit 0 "$rc" "exit code (continues despite failure)"
-    assert_contains "$output" "grove_setup failed" "warning printed"
+    assert_contains "$output" "setup failed" "warning printed"
     assert_contains "$output" "Worktree created" "worktree still created"
 
     echo 'GROVE_AGENT="mock-agent"' > "$HOME/.grove"
@@ -784,7 +784,7 @@ main() {
     test_help
     test_version
     test_dots_in_branch_names
-    test_failed_grove_setup
+    test_failed_setup
     test_git_ref_conflict
     test_init_creates_grove_config
     test_init_detects_project

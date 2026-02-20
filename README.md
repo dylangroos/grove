@@ -46,7 +46,7 @@ gr help                          Help
 
 Idempotent — safe to run multiple times:
 
-1. **No worktree?** Create it, run `grove_setup`, start agent.
+1. **No worktree?** Create it, run `setup`, start agent.
 2. **Worktree exists, no agent?** Start agent (resumes conversation if prior session).
 3. **Agent idle?** Auto-attach (no prompt) or restart with new prompt.
 4. **Agent busy?** Auto-attach (no prompt) or warn and suggest `gr attach`.
@@ -77,7 +77,7 @@ GROVE_AGENT="claude"     # or codex, aider, etc.
 ```bash
 GROVE_PROJECT="myapp"        # defaults to repo dirname
 
-grove_setup() {              # runs once after worktree creation
+setup() {              # runs once after worktree creation
     npm install
 }
 ```

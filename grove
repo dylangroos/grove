@@ -365,10 +365,10 @@ cmd_checkout() {
         fi
 
         # Run setup hook
-        if declare -f grove_setup >/dev/null 2>&1; then
+        if declare -f setup >/dev/null 2>&1; then
             echo -e "\n${BOLD}Running setup...${NC}"
-            if ! (cd "$wt_dir" && grove_setup); then
-                echo -e "${YELLOW}Warning:${NC} grove_setup failed (worktree still created)"
+            if ! (cd "$wt_dir" && setup); then
+                echo -e "${YELLOW}Warning:${NC} setup failed (worktree still created)"
             fi
         fi
 
@@ -865,7 +865,7 @@ cmd_init() {
 
     if [[ ${#setup_cmds[@]} -gt 0 ]]; then
         grovefile+=$'\n'
-        grovefile+="grove_setup() {"
+        grovefile+="setup() {"
         grovefile+=$'\n'
         for cmd in "${setup_cmds[@]}"; do
             grovefile+="    ${cmd}"
@@ -961,7 +961,7 @@ $(echo -e "${BOLD}CONFIGURATION:${NC}")
 
   Grovefile (per-repo, optional):
     GROVE_PROJECT="myapp"
-    grove_setup() { npm install; }
+    setup() { npm install; }
 
 $(echo -e "${BOLD}DETACH:${NC}")
   Ctrl+\\  detach from a foreground agent session

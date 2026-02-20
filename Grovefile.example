@@ -6,6 +6,6 @@ GROVE_PROJECT="myapp"        # defaults to repo dirname
 
 # ─── Setup (runs once after worktree creation) ──────────────────────────────
 
-grove_setup() {
+setup() {
     npm install
 }
