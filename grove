@@ -117,13 +117,16 @@ build_agent_cmd() {
 
     if [[ -n "$prompt" ]]; then
         case "$agent" in
-            claude) echo "claude \"$prompt\"" ;;
+            claude) echo "claude -p \"$prompt\"" ;;
             codex)  echo "codex \"$prompt\"" ;;
             aider)  echo "aider --message \"$prompt\"" ;;
             *)      echo "$agent \"$prompt\"" ;;
         esac
     else
-        echo "$agent"
+        case "$agent" in
+            claude) echo "claude -p" ;;
+            *)      echo "$agent" ;;
+        esac
     fi
 }
 
@@ -244,6 +247,12 @@ cmd_checkout() {
     local slug wt_dir
     slug="$(slugify_branch "$branch")"
     wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    # If no prompt given and we have a TTY, ask interactively
+    if [[ -z "$prompt" && -t 0 ]]; then
+        printf "${DIM}Prompt (enter to attach interactively):${NC} "
+        IFS= read -r prompt
+    fi
 
     # ── Create worktree if needed ──
     if [[ ! -d "$wt_dir" ]]; then
@@ -757,9 +766,9 @@ cmd_help() {
 $(echo -e "${BOLD}grove${NC}") — agent-first worktree manager (v${GROVE_VERSION})
 
 $(echo -e "${BOLD}USAGE:${NC}")
-  gr checkout <branch> "prompt"   Create worktree + background agent
-  gr checkout <branch>            Create worktree + interactive agent
-  gr <branch> "prompt"            Shorthand for checkout
+  gr checkout <branch>             Create worktree + start agent
+                                   (prompts for task, enter to skip)
+  gr <branch> "prompt"            Shorthand — skip the prompt step
   gr status                       Show all worktrees, agents, activity
   gr attach <branch>              Snap into a running agent session
   gr log <branch>                 Agent's commits on this branch
