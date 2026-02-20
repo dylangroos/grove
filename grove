@@ -117,14 +117,14 @@ build_agent_cmd() {
 
     if [[ -n "$prompt" ]]; then
         case "$agent" in
-            claude) echo "claude -p \"$prompt\"" ;;
+            claude) echo "claude --dangerously-skip-permissions \"$prompt\"" ;;
             codex)  echo "codex \"$prompt\"" ;;
             aider)  echo "aider --message \"$prompt\"" ;;
             *)      echo "$agent \"$prompt\"" ;;
         esac
     else
         case "$agent" in
-            claude) echo "claude -p" ;;
+            claude) echo "claude --dangerously-skip-permissions" ;;
             *)      echo "$agent" ;;
         esac
     fi
@@ -731,11 +731,20 @@ _grove_completions() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     case "$prev" in
-        attach|rm|log|diff)
+        attach|rm|log|diff|checkout|co)
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
             if [[ -d "$wt_base" ]]; then
-                COMPREPLY=($(compgen -W "$(ls "$wt_base" 2>/dev/null)" -- "$cur"))
+                # Offer both slug names (easy to type) and branch names
+                local names=""
+                for d in "$wt_base"/*/; do
+                    [ -d "$d" ] || continue
+                    names="$names $(basename "$d")"
+                    local b
+                    b="$(cd "$d" && git rev-parse --abbrev-ref HEAD 2>/dev/null)" || continue
+                    [[ "$b" != "$(basename "$d")" ]] && names="$names $b"
+                done
+                COMPREPLY=($(compgen -W "$names" -- "$cur"))
             fi
             ;;
         grove|gr)
