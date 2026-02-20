@@ -47,8 +47,9 @@ gr help                          Help
 Idempotent — safe to run multiple times:
 
 1. **No worktree?** Create it, run `grove_setup`, start agent.
-2. **Worktree exists, no agent?** Start agent.
-3. **Agent already running?** Print status, suggest `gr attach`.
+2. **Worktree exists, no agent?** Start agent (resumes conversation if prior session).
+3. **Agent idle?** Auto-attach (no prompt) or restart with new prompt.
+4. **Agent busy?** Auto-attach (no prompt) or warn and suggest `gr attach`.
 
 With a prompt → agent runs in background (`dtach -n`). Without → interactive foreground (`dtach -c`).
 
@@ -57,7 +58,8 @@ With a prompt → agent runs in background (`dtach -n`). Without → interactive
 ```
 BRANCH                  AGENT     STATUS     LAST ACTIVITY
 feat/auth               claude    running    3m ago · "add JWT middleware"
-fix/login               claude    done       1h ago · "fix login redirect"
+fix/login               claude    waiting    "fix login redirect"
+refactor/db             claude    done       1h ago · "normalize schema"
 ```
 
 ## Configuration
