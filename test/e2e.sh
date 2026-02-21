@@ -490,7 +490,7 @@ test_init_creates_grove_config() {
     fi
 
     assert_file_exists "$TEST_DIR/Grovefile" "Grovefile created"
-    assert_contains "$output" "Created ~/.grove" "prints config created"
+    assert_contains "$output" "Saved ~/.grove" "prints config saved"
     assert_contains "$output" "Created Grovefile" "prints grovefile created"
 
     cleanup
