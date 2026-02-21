@@ -315,6 +315,8 @@ get_log_activity() {
     local line
     line="$(tail -20 "$log_file" \
         | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' \
+        | sed 's/\x1b\][^\x07]*\x07//g' \
+        | sed 's/\]0;[^]]*//g' \
         | tr -d '\r' \
         | LC_ALL=C tr -cd ' -~\n' \
         | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
