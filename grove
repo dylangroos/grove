@@ -829,53 +829,50 @@ detect_project() {
 
 cmd_init() {
     # ── Global config (~/.grove) ──
-    if [[ ! -f "$GROVE_CONFIG" ]]; then
-        local default_agent
-        default_agent="$(detect_agent_name)"
+    load_grove_config
 
-        echo -e "${BOLD}Global config${NC} (~/.grove)"
-        echo -e "${BOLD}Agent${NC} (coding agent to use):"
-        printf "  [%s] > " "$default_agent"
-        local agent_line
-        if IFS= read -r agent_line; then
-            if [[ -z "$agent_line" && -n "$default_agent" ]]; then
-                agent_line="$default_agent"
-            fi
-        fi
+    # Defaults: current values > auto-detect > empty
+    local current_agent="${GROVE_AGENT:-}"
+    [[ -z "$current_agent" ]] && current_agent="$(detect_agent_name)"
+    local current_flags="${GROVE_AGENT_FLAGS:-}"
 
-        if [[ -n "$agent_line" ]]; then
-            printf 'GROVE_AGENT="%s"\n' "$agent_line" > "$GROVE_CONFIG"
-
-            # Prompt for agent flags (only for claude, which has smart defaults)
-            if [[ "$agent_line" == "claude" ]]; then
-                echo -e "${BOLD}Agent flags${NC} (claude runs with --dangerously-skip-permissions by default):"
-                printf "  Override flags (enter to keep defaults) > "
-                local flags_line
-                if IFS= read -r flags_line; then
-                    if [[ -n "$flags_line" ]]; then
-                        printf 'GROVE_AGENT_FLAGS="%s"\n' "$flags_line" >> "$GROVE_CONFIG"
-                    else
-                        printf '# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default agent flags\n' >> "$GROVE_CONFIG"
-                    fi
-                else
-                    printf '# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default agent flags\n' >> "$GROVE_CONFIG"
-                fi
-            else
-                printf '# GROVE_AGENT_FLAGS=""  # override default agent flags\n' >> "$GROVE_CONFIG"
-            fi
-
-            echo -e "${GREEN}✓${NC} Created ~/.grove"
-            GROVE_AGENT="$agent_line"
-        else
-            echo -e "${DIM}Skipped (no agent found)${NC}"
-        fi
-
-        echo
-    else
-        echo -e "${DIM}~/.grove already exists${NC}"
-        load_grove_config
-        echo
+    echo -e "${BOLD}Global config${NC} (~/.grove)"
+    echo -e "${BOLD}Agent${NC} (coding agent to use):"
+    printf "  [%s] > " "$current_agent"
+    local agent_line
+    if IFS= read -r agent_line; then
+        [[ -z "$agent_line" ]] && agent_line="$current_agent"
     fi
+
+    if [[ -n "$agent_line" ]]; then
+        printf 'GROVE_AGENT="%s"\n' "$agent_line" > "$GROVE_CONFIG"
+
+        # Prompt for agent flags (only for claude, which has smart defaults)
+        if [[ "$agent_line" == "claude" ]]; then
+            local flags_hint="$current_flags"
+            [[ -z "$flags_hint" ]] && flags_hint="--dangerously-skip-permissions"
+            echo -e "${BOLD}Agent flags${NC} (default for background agents):"
+            printf "  [%s] > " "$flags_hint"
+            local flags_line
+            if IFS= read -r flags_line; then
+                [[ -z "$flags_line" ]] && flags_line="$flags_hint"
+            fi
+            if [[ -n "$flags_line" && "$flags_line" != "--dangerously-skip-permissions" ]]; then
+                echo "GROVE_AGENT_FLAGS=\"$flags_line\"" >> "$GROVE_CONFIG"
+            else
+                printf '# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default agent flags\n' >> "$GROVE_CONFIG"
+            fi
+        else
+            printf '# GROVE_AGENT_FLAGS=""  # override default agent flags\n' >> "$GROVE_CONFIG"
+        fi
+
+        echo -e "${GREEN}✓${NC} Saved ~/.grove"
+        GROVE_AGENT="$agent_line"
+    else
+        echo -e "${DIM}Skipped (no agent found)${NC}"
+    fi
+
+    echo
 
     # ── Per-repo Grovefile ──
     if ! find_grove_root; then

@@ -1,5 +1,9 @@
 # grove
 
+<p align="center">
+  <img src="docs/tree.svg" alt="grove" width="500">
+</p>
+
 Run coding agents in parallel across git worktrees.
 
 ```bash
@@ -14,29 +18,12 @@ gr rm feat/auth                 # kill agent + clean up
 
 ```bash
 curl -fsSL grove.wtf/install.sh | bash
+grove init
 ```
 
-Requires bash 4+, git, [dtach](https://github.com/cripty2001/dtach). The install script handles dtach for you.
+That's it. `grove init` walks you through picking your agent and setting up per-repo config. Run it again anytime to change settings.
 
-## Configuration
-
-```bash
-gr init   # interactive setup — creates both files
-```
-
-**`~/.grove`** (global) — which agent to use:
-```bash
-GROVE_AGENT="claude"
-# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default flags
-```
-
-**`Grovefile`** (per-repo, optional) — project setup:
-```bash
-GROVE_PROJECT="myapp"
-setup() { npm install; }
-```
-
-Claude gets `--dangerously-skip-permissions` by default (background agents can't prompt). Set `GROVE_AGENT_FLAGS` to override. Works with Claude, Codex, Aider, or any CLI agent.
+Works with Claude, Codex, Aider, or any CLI agent. Requires bash 4+, git, [dtach](https://github.com/cripty2001/dtach).
 
 ## Commands
 
