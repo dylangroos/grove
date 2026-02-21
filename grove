@@ -1,32 +1,33 @@
 #!/usr/bin/env bash
 #
-# grove — worktree + tmux environment manager
+# grove — agent-first worktree manager
 #
-# Branch name in, environment out. Creates a git worktree and tmux session
-# for any branch — so you can work on multiple branches simultaneously.
+# Spawn coding agents in git worktrees. Snap in, snap out, let them work.
 #
 # QUICK START:
-#   grove feat/auth          # create worktree + tmux session
-#   grove attach feat/auth   # attach to the session
-#   grove ls                 # list worktrees + session status
-#   grove rm feat/auth       # kill session + remove worktree
+#   gr checkout feat/auth "add auth"   # worktree + background agent
+#   gr checkout feat/auth              # worktree + interactive agent
+#   gr status                          # all worktrees, agents, activity
+#   gr attach feat/auth                # snap into running agent
+#   gr rm feat/auth                    # kill agent + remove worktree
 #
-# CONFIGURATION (optional):
-#   Create a Grovefile at your repo root:
+# SHORTHANDS:
+#   gr feat/auth "add auth"            # same as gr checkout feat/auth "add auth"
+#   gr                                 # same as gr status
 #
-#     GROVE_PROJECT="myapp"
-#     grove_setup()   { npm install; }
-#     grove_windows() { grove_window "server" "npm run dev"; }
+# CONFIGURATION:
+#   ~/.grove           — global config (agent choice)
+#   Grovefile          — per-repo (project name, setup hook)
 #
 # DEPENDENCIES:
 #   - bash 4+   (macOS: brew install bash)
 #   - git       (for worktree management)
-#   - tmux      (for session management)
+#   - dtach     (for detachable agent sessions)
 #
 
 set -euo pipefail
 
-GROVE_VERSION="0.2.0"
+GROVE_VERSION="0.3.0"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -42,36 +43,28 @@ NC='\033[0m'
 GROVE_ROOT=""
 GROVE_PROJECT=""
 GROVE_WORKTREE_DIR=".worktrees"
-
-# Internal state for window collection
-_GROVE_WINDOWS=()
-_GROVE_WINDOW_CMDS=()
-
-# ─── Helper functions (available to Grovefile) ───────────────────────────────
-
-grove_window() {
-    local name="$1"
-    local cmd="$2"
-    _GROVE_WINDOWS+=("$name")
-    _GROVE_WINDOW_CMDS+=("$cmd")
-}
+GROVE_CONFIG="$HOME/.grove"
+GROVE_AGENT=""
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 find_grove_root() {
-    # Use git to find the true repo root (works from inside worktrees too)
     local toplevel gitcommon
 
     toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
     gitcommon="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
 
-    # git-common-dir gives us the path to the shared .git directory.
-    # For worktrees this points back to the main repo's .git, so resolve it.
     if [[ "$gitcommon" == "$toplevel/.git" ]]; then
         GROVE_ROOT="$toplevel"
     else
-        # We're inside a worktree — resolve the main repo root
         GROVE_ROOT="$(cd "$toplevel" && cd "$(git rev-parse --git-common-dir)/.." && pwd)"
+    fi
+}
+
+load_grove_config() {
+    if [[ -f "$GROVE_CONFIG" ]]; then
+        # shellcheck disable=SC1090
+        source "$GROVE_CONFIG"
     fi
 }
 
@@ -81,12 +74,13 @@ load_grovefile() {
         exit 1
     fi
 
+    load_grove_config
+
     if [[ -f "$GROVE_ROOT/Grovefile" ]]; then
         # shellcheck disable=SC1091
         source "$GROVE_ROOT/Grovefile"
     fi
 
-    # Default project name to repo dirname if not set
     if [[ -z "${GROVE_PROJECT:-}" ]]; then
         GROVE_PROJECT="$(basename "$GROVE_ROOT")"
     fi
@@ -101,30 +95,240 @@ slugify_branch() {
         | cut -c1-50
 }
 
-session_name() {
-    local slug="$1"
-    echo "grove-${GROVE_PROJECT}-${slug}"
+# ─── Agent helpers ───────────────────────────────────────────────────────────
+
+detect_agent_name() {
+    if command -v claude >/dev/null 2>&1; then
+        echo "claude"
+    elif command -v codex >/dev/null 2>&1; then
+        echo "codex"
+    elif command -v aider >/dev/null 2>&1; then
+        echo "aider"
+    fi
+}
+
+build_agent_cmd() {
+    local agent="$1"
+    local prompt="${2:-}"
+    local continue_mode="${3:-}"
+
+    if [[ -z "$agent" ]]; then
+        return 1
+    fi
+
+    if [[ -n "$prompt" ]]; then
+        case "$agent" in
+            claude)
+                local cmd="claude --dangerously-skip-permissions"
+                [[ -n "$continue_mode" ]] && cmd="$cmd --continue"
+                echo "$cmd \"$prompt\""
+                ;;
+            codex)  echo "codex \"$prompt\"" ;;
+            aider)  echo "aider --message \"$prompt\"" ;;
+            *)      echo "$agent \"$prompt\"" ;;
+        esac
+    else
+        case "$agent" in
+            claude)
+                local cmd="claude --dangerously-skip-permissions"
+                [[ -n "$continue_mode" ]] && cmd="$cmd --continue"
+                echo "$cmd"
+                ;;
+            *)      echo "$agent" ;;
+        esac
+    fi
+}
+
+grove_socket_path() {
+    local wt_dir="$1"
+    echo "$wt_dir/.grove-socket"
+}
+
+grove_log_path() {
+    local wt_dir="$1"
+    echo "$wt_dir/.grove-agent.log"
+}
+
+grove_prompt_path() {
+    local wt_dir="$1"
+    echo "$wt_dir/.grove-prompt"
+}
+
+is_agent_running() {
+    local wt_dir="${1%/}"
+    local socket
+    socket="$(grove_socket_path "$wt_dir")"
+    [[ -S "$socket" ]] || return 1
+    # Verify dtach process is alive; clean up stale socket
+    if command -v lsof >/dev/null 2>&1; then
+        local pid
+        pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$socket"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+get_agent_status() {
+    local wt_dir="${1%/}"
+    if ! is_agent_running "$wt_dir"; then
+        echo "done"; return 0
+    fi
+    local log_file
+    log_file="$(grove_log_path "$wt_dir")"
+    if [[ ! -f "$log_file" ]]; then
+        echo "running"; return 0
+    fi
+    local now log_mtime age
+    now="$(date +%s)"
+    log_mtime="$(stat -c %Y "$log_file" 2>/dev/null)" || log_mtime=0
+    age=$((now - log_mtime))
+    if [[ "$age" -le 10 ]]; then
+        echo "running"
+    else
+        echo "waiting"
+    fi
+}
+
+has_prior_session() {
+    local wt_dir="${1%/}"
+    local log_file
+    log_file="$(grove_log_path "$wt_dir")"
+    [[ -s "$log_file" ]]
+}
+
+kill_agent() {
+    local wt_dir="$1"
+    local socket
+    socket="$(grove_socket_path "$wt_dir")"
+
+    if [[ -S "$socket" ]]; then
+        # Get the PID of the dtach process from the socket
+        local pid
+        pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+
+        if [[ -n "$pid" ]]; then
+            kill "$pid" 2>/dev/null || true
+            # Wait briefly for cleanup
+            local i=0
+            while kill -0 "$pid" 2>/dev/null && [[ $i -lt 10 ]]; do
+                sleep 0.1
+                i=$((i + 1))
+            done
+            # Force kill if still running
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
+
+        rm -f "$socket"
+    fi
+}
+
+# ─── Formatting helpers ─────────────────────────────────────────────────────
+
+format_duration() {
+    local seconds="$1"
+
+    if [[ "$seconds" -lt 60 ]]; then
+        echo "${seconds}s ago"
+    elif [[ "$seconds" -lt 3600 ]]; then
+        echo "$((seconds / 60))m ago"
+    elif [[ "$seconds" -lt 86400 ]]; then
+        echo "$((seconds / 3600))h ago"
+    else
+        echo "$((seconds / 86400))d ago"
+    fi
+}
+
+get_last_activity() {
+    local wt_dir="$1"
+    local base_file="$wt_dir/.grove-base-commit"
+
+    # If base commit recorded, skip if no agent commits yet
+    if [[ -f "$base_file" ]]; then
+        local base head
+        base="$(cat "$base_file")"
+        head="$(cd "$wt_dir" && git rev-parse HEAD 2>/dev/null)" || return 1
+        [[ "$head" != "$base" ]] || return 1
+    fi
+
+    local timestamp subject
+    timestamp="$(cd "$wt_dir" && git log -1 --format='%ct' 2>/dev/null)" || return 1
+    subject="$(cd "$wt_dir" && git log -1 --format='%s' 2>/dev/null)" || return 1
+    [[ -n "$timestamp" ]] || return 1
+
+    local now elapsed duration
+    now="$(date +%s)"
+    elapsed=$((now - timestamp))
+    duration="$(format_duration "$elapsed")"
+
+    echo "${duration} · \"${subject}\""
+}
+
+get_log_activity() {
+    local wt_dir="${1%/}"
+    local log_file
+    log_file="$(grove_log_path "$wt_dir")"
+    [[ -s "$log_file" ]] || return 1
+
+    local line
+    line="$(tail -20 "$log_file" \
+        | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' \
+        | tr -d '\r' \
+        | LC_ALL=C tr -cd ' -~\n' \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+        | grep '[a-zA-Z]' \
+        | tail -1)"
+    [[ -n "$line" ]] || return 1
+
+    # Truncate to 60 chars for status display
+    if [[ ${#line} -gt 60 ]]; then
+        line="${line:0:57}..."
+    fi
+    echo "$line"
+}
+
+get_diff_stat() {
+    local wt_dir="$1"
+    local base
+
+    base="$(cd "$wt_dir" && git merge-base HEAD "$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || echo main)" 2>/dev/null)" || return 1
+
+    local stat
+    stat="$(cd "$wt_dir" && git diff --shortstat "$base"..HEAD 2>/dev/null)" || return 1
+
+    if [[ -z "$stat" ]]; then
+        return 1
+    fi
+
+    # Parse "3 files changed, 42 insertions(+), 8 deletions(-)"
+    local files ins del
+    files="$(echo "$stat" | grep -oP '\d+ file' | grep -oP '\d+')" || files="0"
+    ins="$(echo "$stat" | grep -oP '\d+ insertion' | grep -oP '\d+')" || ins="0"
+    del="$(echo "$stat" | grep -oP '\d+ deletion' | grep -oP '\d+')" || del="0"
+
+    echo "+${ins} -${del} (${files} files)"
 }
 
 # ─── Commands ────────────────────────────────────────────────────────────────
 
-cmd_open() {
+cmd_checkout() {
     local branch="$1"
     shift
-    local do_attach=false
+    local prompt="${*:-}"
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --attach|-a) do_attach=true ;;
-            *) echo -e "${RED}Error:${NC} Unknown option: $1" >&2; exit 1 ;;
-        esac
-        shift
-    done
-
-    local slug session wt_dir
+    local slug wt_dir
     slug="$(slugify_branch "$branch")"
-    session="$(session_name "$slug")"
     wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    # If no prompt given and we have a TTY, ask interactively
+    if [[ -z "$prompt" && -t 0 ]]; then
+        printf "${DIM}Prompt (enter to attach interactively):${NC} "
+        IFS= read -r prompt
+    fi
 
     # ── Create worktree if needed ──
     if [[ ! -d "$wt_dir" ]]; then
@@ -161,52 +365,172 @@ cmd_open() {
         fi
 
         # Run setup hook
-        if declare -f grove_setup >/dev/null 2>&1; then
+        if declare -f setup >/dev/null 2>&1; then
             echo -e "\n${BOLD}Running setup...${NC}"
-            if ! (cd "$wt_dir" && grove_setup); then
-                echo -e "${YELLOW}Warning:${NC} grove_setup failed (worktree still created)"
+            if ! (cd "$wt_dir" && setup); then
+                echo -e "${YELLOW}Warning:${NC} setup failed (worktree still created)"
             fi
         fi
+
+        # Record base commit so status can distinguish inherited vs agent commits
+        git -C "$wt_dir" rev-parse HEAD > "$wt_dir/.grove-base-commit"
 
         echo -e "${GREEN}✓${NC} Worktree created: $wt_dir"
     fi
 
-    # ── Create tmux session if needed ──
-    if ! tmux has-session -t "$session" 2>/dev/null; then
-        _GROVE_WINDOWS=()
-        _GROVE_WINDOW_CMDS=()
-
-        if declare -f grove_windows >/dev/null 2>&1; then
-            grove_windows
-        fi
-
-        if [[ ${#_GROVE_WINDOWS[@]} -gt 0 ]]; then
-            # Create session with the first window
-            tmux new-session -d -s "$session" -n "${_GROVE_WINDOWS[0]}" -c "$wt_dir"
-            tmux send-keys -t "$session:${_GROVE_WINDOWS[0]}" "${_GROVE_WINDOW_CMDS[0]}" C-m
-
-            # Create remaining windows
-            for ((i = 1; i < ${#_GROVE_WINDOWS[@]}; i++)); do
-                tmux new-window -t "$session" -n "${_GROVE_WINDOWS[$i]}" -c "$wt_dir"
-                tmux send-keys -t "$session:${_GROVE_WINDOWS[$i]}" "${_GROVE_WINDOW_CMDS[$i]}" C-m
-            done
-
-            # Always add a shell window
-            tmux new-window -t "$session" -n "shell" -c "$wt_dir"
-        else
-            # No windows defined — just a shell
-            tmux new-session -d -s "$session" -n "shell" -c "$wt_dir"
-        fi
-
-        echo -e "${GREEN}✓${NC} Session started: $session"
-    else
-        echo -e "Session already running: $session"
+    # ── Start agent ──
+    local agent="${GROVE_AGENT:-}"
+    if [[ -z "$agent" ]]; then
+        agent="$(detect_agent_name)"
     fi
 
-    echo -e "  Attach: ${DIM}grove attach $branch${NC}"
+    if [[ -z "$agent" ]]; then
+        echo -e "${DIM}No agent configured. Run 'gr init' or set GROVE_AGENT in ~/.grove${NC}"
+        return 0
+    fi
 
-    if $do_attach; then
-        exec tmux attach-session -t "$session"
+    local socket log_file
+    socket="$(grove_socket_path "$wt_dir")"
+    log_file="$(grove_log_path "$wt_dir")"
+
+    # Save prompt if provided
+    if [[ -n "$prompt" ]]; then
+        echo "$prompt" > "$(grove_prompt_path "$wt_dir")"
+    fi
+
+    local agent_status
+    agent_status="$(get_agent_status "$wt_dir")"
+
+    # ── Agent already running ──
+    if [[ "$agent_status" != "done" ]]; then
+        if [[ -z "$prompt" ]]; then
+            # No prompt → auto-attach
+            if [[ -t 0 ]]; then
+                echo -e "Attaching to agent in ${BOLD}$branch${NC}"
+                echo -e "  ${DIM}Detach with Ctrl+\\${NC}"
+                exec dtach -a "$socket" -z
+            else
+                echo -e "Agent running in ${BOLD}$branch${NC}"
+                echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+                return 0
+            fi
+        elif [[ "$agent_status" == "waiting" ]]; then
+            # Idle agent + new prompt → kill and restart with --continue
+            kill_agent "$wt_dir"
+            local agent_cmd
+            agent_cmd="$(build_agent_cmd "$agent" "$prompt" "continue")"
+            dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+            echo -e "${GREEN}✓${NC} Agent restarted with --continue (background): ${BOLD}$agent${NC}"
+            echo -e "  Prompt: ${DIM}\"$prompt\"${NC}"
+            echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+            return 0
+        else
+            # Agent actively working + new prompt → warn
+            echo -e "${YELLOW}Agent is busy${NC} in ${BOLD}$branch${NC}"
+            echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+            return 0
+        fi
+    fi
+
+    # ── Agent not running — start fresh or continue ──
+    local continue_flag=""
+    if has_prior_session "$wt_dir"; then
+        continue_flag="continue"
+    fi
+
+    local agent_cmd
+    agent_cmd="$(build_agent_cmd "$agent" "$prompt" "$continue_flag")"
+
+    if [[ -n "$prompt" ]]; then
+        # Background mode: dtach -n (no attach)
+        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+        echo -e "${GREEN}✓${NC} Agent started (background): ${BOLD}$agent${NC}"
+        echo -e "  Prompt: ${DIM}\"$prompt\"${NC}"
+        echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+    elif [[ -t 0 ]]; then
+        # Foreground mode: dtach -c (create and attach, needs TTY)
+        echo -e "${GREEN}✓${NC} Starting agent: ${BOLD}$agent${NC}"
+        echo -e "  ${DIM}Detach with Ctrl+\\${NC}"
+        dtach -c "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+    else
+        # No TTY available — fall back to background
+        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+        echo -e "${GREEN}✓${NC} Agent started (background): ${BOLD}$agent${NC}"
+        echo -e "  Attach: ${DIM}gr attach $branch${NC}"
+    fi
+}
+
+cmd_status() {
+    local wt_base="$GROVE_ROOT/$GROVE_WORKTREE_DIR"
+
+    if [[ ! -d "$wt_base" ]] || [[ -z "$(ls -A "$wt_base" 2>/dev/null)" ]]; then
+        echo -e "${DIM}No worktrees${NC}"
+        return 0
+    fi
+
+    printf "${DIM}%-24s %-10s %-10s %s${NC}\n" "BRANCH" "AGENT" "STATUS" "LAST ACTIVITY"
+
+    for wt_dir in "$wt_base"/*/; do
+        [[ -d "$wt_dir" ]] || continue
+        cmd_status_single "$wt_dir"
+    done
+}
+
+cmd_status_single() {
+    local wt_dir="$1"
+    local slug branch agent_name status_str activity
+
+    slug="$(basename "$wt_dir")"
+    branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$slug")"
+
+    # Agent name
+    agent_name="${GROVE_AGENT:-}"
+    if [[ -z "$agent_name" ]]; then
+        agent_name="$(detect_agent_name)"
+    fi
+    agent_name="${agent_name:-—}"
+
+    # Status
+    local agent_status
+    agent_status="$(get_agent_status "$wt_dir")"
+    case "$agent_status" in
+        running) status_str="${GREEN}running${NC}" ;;
+        waiting) status_str="${YELLOW}waiting${NC}" ;;
+        *)       status_str="${DIM}done${NC}" ;;
+    esac
+
+    # Last activity
+    activity="$(get_last_activity "$wt_dir" 2>/dev/null)" || activity=""
+
+    # If done, try to show diff stat instead
+    if [[ "$agent_status" == "done" ]] && [[ -z "$activity" ]]; then
+        activity=""
+    fi
+
+    # Try agent log output
+    if [[ -z "$activity" ]]; then
+        activity="$(get_log_activity "$wt_dir" 2>/dev/null)" || activity=""
+    fi
+
+    # Prompt info
+    local prompt_file
+    prompt_file="$(grove_prompt_path "$wt_dir")"
+    if [[ -n "$activity" ]]; then
+        : # already have activity
+    elif [[ -f "$prompt_file" ]]; then
+        local saved_prompt
+        saved_prompt="$(cat "$prompt_file")"
+        activity="\"${saved_prompt}\""
+    fi
+
+    printf "%-24s %-10s " "$branch" "$agent_name"
+    printf "%b" "$status_str"
+    # Pad status column (account for color codes)
+    printf "%-4s" ""
+    if [[ -n "$activity" ]]; then
+        echo -e " $activity"
+    else
+        echo
     fi
 }
 
@@ -215,63 +539,114 @@ cmd_attach() {
 
     if [[ -z "$branch" ]]; then
         echo -e "${RED}Error:${NC} Missing branch name" >&2
-        echo "Usage: grove attach <branch>" >&2
+        echo "Usage: gr attach <branch>" >&2
         exit 1
     fi
 
-    local slug session
+    local slug wt_dir socket
     slug="$(slugify_branch "$branch")"
-    session="$(session_name "$slug")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+    socket="$(grove_socket_path "$wt_dir")"
 
-    if ! tmux has-session -t "$session" 2>/dev/null; then
-        echo -e "${RED}Error:${NC} No session for '$branch'" >&2
-        echo -e "Start it first: ${DIM}grove $branch${NC}" >&2
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} No worktree for '$branch'" >&2
+        echo -e "Start it first: ${DIM}gr checkout $branch${NC}" >&2
         exit 1
     fi
 
-    exec tmux attach-session -t "$session"
+    if [[ ! -S "$socket" ]]; then
+        echo -e "${RED}Error:${NC} No running agent for '$branch'" >&2
+        echo -e "Start one: ${DIM}gr checkout $branch${NC}" >&2
+        exit 1
+    fi
+
+    exec dtach -a "$socket" -z
 }
 
-cmd_ls() {
-    local wt_base="$GROVE_ROOT/$GROVE_WORKTREE_DIR"
+cmd_log() {
+    local branch="${1:-}"
 
-    if [[ ! -d "$wt_base" ]] || [[ -z "$(ls -A "$wt_base" 2>/dev/null)" ]]; then
-        echo -e "${DIM}No worktrees${NC}"
+    if [[ -z "$branch" ]]; then
+        echo -e "${RED}Error:${NC} Missing branch name" >&2
+        echo "Usage: gr log <branch>" >&2
+        exit 1
+    fi
+
+    local slug wt_dir
+    slug="$(slugify_branch "$branch")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} No worktree for '$branch'" >&2
+        exit 1
+    fi
+
+    local base
+    base="$(cd "$wt_dir" && git merge-base HEAD main 2>/dev/null)" || {
+        # Fallback: just show recent commits
+        (cd "$wt_dir" && git log --oneline -20)
+        return
+    }
+
+    (cd "$wt_dir" && git log --oneline "$base"..HEAD)
+}
+
+cmd_diff() {
+    local branch="${1:-}"
+
+    if [[ -z "$branch" ]]; then
+        echo -e "${RED}Error:${NC} Missing branch name" >&2
+        echo "Usage: gr diff <branch>" >&2
+        exit 1
+    fi
+
+    local slug wt_dir
+    slug="$(slugify_branch "$branch")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} No worktree for '$branch'" >&2
+        exit 1
+    fi
+
+    local base
+    base="$(cd "$wt_dir" && git merge-base HEAD main 2>/dev/null)" || {
+        echo -e "${RED}Error:${NC} Could not find merge base with main" >&2
+        exit 1
+    }
+
+    (cd "$wt_dir" && git diff "$base"..HEAD)
+}
+
+cmd_output() {
+    local branch="${1:-}"
+    if [[ -z "$branch" ]]; then
+        echo -e "${RED}Error:${NC} Missing branch name" >&2
+        echo "Usage: gr output <branch>" >&2
+        exit 1
+    fi
+
+    local slug wt_dir log_file
+    slug="$(slugify_branch "$branch")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} No worktree for '$branch'" >&2
+        exit 1
+    fi
+
+    log_file="$(grove_log_path "$wt_dir")"
+    if [[ ! -s "$log_file" ]]; then
+        echo -e "${DIM}No output yet${NC}"
         return 0
     fi
 
-    printf "${DIM}%-30s %-12s${NC}\n" "BRANCH" "SESSION"
-
-    for wt_dir in "$wt_base"/*/; do
-        [[ -d "$wt_dir" ]] || continue
-
-        local slug branch session status
-        slug="$(basename "$wt_dir")"
-        branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$slug")"
-        session="$(session_name "$slug")"
-
-        if tmux has-session -t "$session" 2>/dev/null; then
-            # Check if any client is attached
-            local clients
-            clients="$(tmux list-clients -t "$session" 2>/dev/null | wc -l | tr -d ' ')"
-            if [[ "$clients" -gt 0 ]]; then
-                status="${GREEN}attached${NC}"
-            else
-                status="${YELLOW}detached${NC}"
-            fi
-        else
-            status="${DIM}-${NC}"
-        fi
-
-        printf "%-30s " "$branch"
-        echo -e "$status"
-    done
+    cat "$log_file"
 }
 
 cmd_rm() {
     local branch="${1:-}"
 
-    # Handle --all flag
     if [[ "$branch" == "--all" ]]; then
         cmd_rm_all
         return
@@ -279,14 +654,13 @@ cmd_rm() {
 
     if [[ -z "$branch" ]]; then
         echo -e "${RED}Error:${NC} Missing branch name" >&2
-        echo "Usage: grove rm <branch>" >&2
-        echo "       grove rm --all" >&2
+        echo "Usage: gr rm <branch>" >&2
+        echo "       gr rm --all" >&2
         exit 1
     fi
 
-    local slug session wt_dir
+    local slug wt_dir
     slug="$(slugify_branch "$branch")"
-    session="$(session_name "$slug")"
     wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
 
     if [[ ! -d "$wt_dir" ]]; then
@@ -304,15 +678,23 @@ cmd_rm() {
         exit 1
     fi
 
-    # Kill tmux session if running
-    if tmux has-session -t "$session" 2>/dev/null; then
-        tmux kill-session -t "$session"
-        echo -e "Session killed: $session"
+    # Kill agent if running
+    if is_agent_running "$wt_dir"; then
+        kill_agent "$wt_dir"
+        echo -e "Agent killed"
     fi
 
     # Remove worktree
+    local wt_branch
+    wt_branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
     git -C "$GROVE_ROOT" worktree remove "$wt_dir" --force 2>/dev/null || rm -rf "$wt_dir"
     git -C "$GROVE_ROOT" worktree prune 2>/dev/null || true
+
+    # Clean up the branch if it's not checked out elsewhere
+    if [[ -n "$wt_branch" && "$wt_branch" != "HEAD" ]]; then
+        git -C "$GROVE_ROOT" branch -D "$wt_branch" 2>/dev/null || true
+    fi
+
     echo -e "${GREEN}✓${NC} Removed: $slug"
 }
 
@@ -324,7 +706,6 @@ cmd_rm_all() {
         return 0
     fi
 
-    # List what will be removed
     echo -e "${BOLD}Will remove:${NC}"
     for wt_dir in "$wt_base"/*/; do
         [[ -d "$wt_dir" ]] || continue
@@ -332,36 +713,42 @@ cmd_rm_all() {
     done
 
     echo
-    read -rp "Remove all worktrees and sessions? [y/N] " confirm
+    read -rp "Remove all worktrees and agents? [y/N] " confirm
     if [[ "$confirm" != [yY] ]]; then
         echo "Cancelled."
         return 0
     fi
 
+    local branches_to_delete=()
     for wt_dir in "$wt_base"/*/; do
         [[ -d "$wt_dir" ]] || continue
-        local slug session
+        local slug wt_branch
         slug="$(basename "$wt_dir")"
-        session="$(session_name "$slug")"
-
-        if tmux has-session -t "$session" 2>/dev/null; then
-            tmux kill-session -t "$session"
+        wt_branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
+        if [[ -n "$wt_branch" && "$wt_branch" != "HEAD" ]]; then
+            branches_to_delete+=("$wt_branch")
         fi
 
+        kill_agent "$wt_dir"
         git -C "$GROVE_ROOT" worktree remove "$wt_dir" --force 2>/dev/null || rm -rf "$wt_dir"
     done
 
     git -C "$GROVE_ROOT" worktree prune 2>/dev/null || true
+
+    for br in "${branches_to_delete[@]}"; do
+        git -C "$GROVE_ROOT" branch -D "$br" 2>/dev/null || true
+    done
+
     echo -e "${GREEN}✓${NC} All worktrees removed"
 }
 
-# ─── Init ───────────────────────────────────────────────────────────────────
+# ─── Init ────────────────────────────────────────────────────────────────────
 
 detect_project() {
     local dir="$1"
-    local type="unknown" setup="" window="" pm="npm"
+    local type="unknown" setup=""
 
-    # Detect Node.js package manager from lock files
+    local pm="npm"
     if [[ -f "$dir/bun.lockb" ]] || [[ -f "$dir/bun.lock" ]]; then
         pm="bun"
     elif [[ -f "$dir/pnpm-lock.yaml" ]]; then
@@ -373,20 +760,12 @@ detect_project() {
     if [[ -f "$dir/Cargo.toml" ]]; then
         type="rust"
         setup="cargo build"
-        window="cargo run"
     elif [[ -f "$dir/go.mod" ]]; then
         type="go"
         setup="go build ./..."
-        window="go run ."
     elif [[ -f "$dir/package.json" ]]; then
         type="node ($pm)"
         setup="$pm install"
-        # Check if "dev" script exists in package.json
-        if grep -q '"dev"' "$dir/package.json" 2>/dev/null; then
-            window="$pm run dev"
-        elif grep -q '"start"' "$dir/package.json" 2>/dev/null; then
-            window="$pm start"
-        fi
     elif [[ -f "$dir/pyproject.toml" ]]; then
         if [[ -f "$dir/uv.lock" ]]; then
             type="python (uv)"
@@ -401,161 +780,79 @@ detect_project() {
     elif [[ -f "$dir/Gemfile" ]]; then
         type="ruby"
         setup="bundle install"
-        if [[ -f "$dir/bin/rails" ]]; then
-            window="bin/rails server"
-        fi
     elif [[ -f "$dir/composer.json" ]]; then
         type="php"
         setup="composer install"
-        if [[ -f "$dir/artisan" ]]; then
-            window="php artisan serve"
-        fi
     fi
 
     echo "$type"
     echo "$setup"
-    echo "$window"
-}
-
-detect_agent() {
-    if command -v claude >/dev/null 2>&1; then
-        echo "claude --dangerously-skip-permissions"
-    elif command -v codex >/dev/null 2>&1; then
-        echo "codex"
-    elif command -v aider >/dev/null 2>&1; then
-        echo "aider"
-    fi
-}
-
-window_name_from_cmd() {
-    local cmd="$1" index="$2"
-
-    # cd <dir> && ... → use <dir>
-    if [[ "$cmd" =~ ^cd[[:space:]]+([^[:space:]&]+)[[:space:]]*\&\& ]]; then
-        echo "${BASH_REMATCH[1]}"
-        return
-    fi
-
-    # * run <name> → use <name>
-    if [[ "$cmd" =~ [[:space:]]run[[:space:]]+([^[:space:]]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
-        return
-    fi
-
-    # * start → "start"
-    if [[ "$cmd" =~ [[:space:]]start$ ]] || [[ "$cmd" =~ ^[^[:space:]]+[[:space:]]start$ ]]; then
-        echo "start"
-        return
-    fi
-
-    echo "window-$index"
 }
 
 cmd_init() {
+    # ── Global config (~/.grove) ──
+    if [[ ! -f "$GROVE_CONFIG" ]]; then
+        local default_agent
+        default_agent="$(detect_agent_name)"
+
+        echo -e "${BOLD}Global config${NC} (~/.grove)"
+        echo -e "${BOLD}Agent${NC} (coding agent to use):"
+        printf "  [%s] > " "$default_agent"
+        local agent_line
+        if IFS= read -r agent_line; then
+            if [[ -z "$agent_line" && -n "$default_agent" ]]; then
+                agent_line="$default_agent"
+            fi
+        fi
+
+        if [[ -n "$agent_line" ]]; then
+            printf 'GROVE_AGENT="%s"\n' "$agent_line" > "$GROVE_CONFIG"
+            echo -e "${GREEN}✓${NC} Created ~/.grove"
+            GROVE_AGENT="$agent_line"
+        else
+            echo -e "${DIM}Skipped (no agent found)${NC}"
+        fi
+
+        echo
+    else
+        echo -e "${DIM}~/.grove already exists${NC}"
+        load_grove_config
+        echo
+    fi
+
+    # ── Per-repo Grovefile ──
     if ! find_grove_root; then
-        echo -e "${RED}Error:${NC} Not in a git repository" >&2
-        exit 1
+        echo -e "${DIM}Not in a git repo — skipping Grovefile${NC}"
+        return 0
     fi
 
     if [[ -f "$GROVE_ROOT/Grovefile" ]]; then
-        echo -e "${RED}Error:${NC} Grovefile already exists" >&2
-        exit 1
+        echo -e "${DIM}Grovefile already exists${NC}"
+        return 0
     fi
 
     local project_name
     project_name="$(basename "$GROVE_ROOT")"
 
-    # Detect project type
-    local detection type default_setup default_window
+    local detection type default_setup
     detection="$(detect_project "$GROVE_ROOT")"
     type="$(echo "$detection" | sed -n '1p')"
     default_setup="$(echo "$detection" | sed -n '2p')"
-    default_window="$(echo "$detection" | sed -n '3p')"
 
     if [[ "$type" != "unknown" ]]; then
         echo -e "Detected: ${BOLD}${type}${NC}"
     fi
-    echo
 
     # ── Collect setup commands ──
     local setup_cmds=()
-    local first=true
-
     echo -e "${BOLD}Setup${NC} (runs once per worktree, empty line to skip):"
-
-    while true; do
-        if $first; then
-            printf "  [%s] > " "$default_setup"
-            first=false
-            local line
-            IFS= read -r line || break
-            if [[ -z "$line" ]]; then
-                # Accept default
-                if [[ -n "$default_setup" ]]; then
-                    setup_cmds+=("$default_setup")
-                fi
-                break
-            else
-                setup_cmds+=("$line")
-            fi
-        else
-            printf "  > "
-            local line
-            IFS= read -r line || break
-            if [[ -z "$line" ]]; then
-                break
-            fi
+    printf "  [%s] > " "$default_setup"
+    local line
+    if IFS= read -r line; then
+        if [[ -z "$line" && -n "$default_setup" ]]; then
+            setup_cmds+=("$default_setup")
+        elif [[ -n "$line" ]]; then
             setup_cmds+=("$line")
-        fi
-    done
-
-    echo
-
-    # ── Collect window commands ──
-    local window_cmds=()
-    first=true
-
-    echo -e "${BOLD}Windows${NC} (each gets a tmux window, empty line to skip):"
-
-    while true; do
-        if $first; then
-            printf "  [%s] > " "$default_window"
-            first=false
-            local line
-            IFS= read -r line || break
-            if [[ -z "$line" ]]; then
-                if [[ -n "$default_window" ]]; then
-                    window_cmds+=("$default_window")
-                fi
-                break
-            else
-                window_cmds+=("$line")
-            fi
-        else
-            printf "  > "
-            local line
-            IFS= read -r line || break
-            if [[ -z "$line" ]]; then
-                break
-            fi
-            window_cmds+=("$line")
-        fi
-    done
-
-    # ── Collect agent command ──
-    local default_agent agent_cmd=""
-    default_agent="$(detect_agent)"
-
-    echo -e "${BOLD}Agent${NC} (runs in its own window, empty line to skip):"
-    printf "  [%s] > " "$default_agent"
-    local agent_line
-    if IFS= read -r agent_line; then
-        if [[ -z "$agent_line" ]]; then
-            if [[ -n "$default_agent" ]]; then
-                agent_cmd="$default_agent"
-            fi
-        else
-            agent_cmd="$agent_line"
         fi
     fi
 
@@ -568,7 +865,7 @@ cmd_init() {
 
     if [[ ${#setup_cmds[@]} -gt 0 ]]; then
         grovefile+=$'\n'
-        grovefile+="grove_setup() {"
+        grovefile+="setup() {"
         grovefile+=$'\n'
         for cmd in "${setup_cmds[@]}"; do
             grovefile+="    ${cmd}"
@@ -578,33 +875,10 @@ cmd_init() {
         grovefile+=$'\n'
     fi
 
-    if [[ ${#window_cmds[@]} -gt 0 || -n "$agent_cmd" ]]; then
-        grovefile+=$'\n'
-        grovefile+="grove_windows() {"
-        grovefile+=$'\n'
-        if [[ ${#window_cmds[@]} -gt 0 ]]; then
-            local i=1
-            for cmd in "${window_cmds[@]}"; do
-                local wname
-                wname="$(window_name_from_cmd "$cmd" "$i")"
-                grovefile+="    grove_window \"${wname}\" \"${cmd}\""
-                grovefile+=$'\n'
-                i=$((i + 1))
-            done
-        fi
-        if [[ -n "$agent_cmd" ]]; then
-            grovefile+="    grove_window \"agent\" \"${agent_cmd}\""
-            grovefile+=$'\n'
-        fi
-        grovefile+="}"
-        grovefile+=$'\n'
-    fi
-
     printf '%s' "$grovefile" > "$GROVE_ROOT/Grovefile"
 
     echo -e "${GREEN}✓${NC} Created Grovefile"
     echo
-    # Display the generated Grovefile indented
     while IFS= read -r line; do
         echo "  $line"
     done < "$GROVE_ROOT/Grovefile"
@@ -613,22 +887,31 @@ cmd_init() {
 cmd_completions() {
     cat <<'COMP'
 # grove shell completions — add to .bashrc or .zshrc:
-#   eval "$(grove completions)"
+#   eval "$(grove completions)"   or   eval "$(gr completions)"
 
 _grove_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     case "$prev" in
-        attach|rm)
+        attach|rm|log|diff|output|checkout|co)
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
             if [[ -d "$wt_base" ]]; then
-                COMPREPLY=($(compgen -W "$(ls "$wt_base" 2>/dev/null)" -- "$cur"))
+                # Offer both slug names (easy to type) and branch names
+                local names=""
+                for d in "$wt_base"/*/; do
+                    [ -d "$d" ] || continue
+                    names="$names $(basename "$d")"
+                    local b
+                    b="$(cd "$d" && git rev-parse --abbrev-ref HEAD 2>/dev/null)" || continue
+                    [[ "$b" != "$(basename "$d")" ]] && names="$names $b"
+                done
+                COMPREPLY=($(compgen -W "$names" -- "$cur"))
             fi
             ;;
-        grove)
-            local subcmds="ls rm attach init help version completions"
+        grove|gr)
+            local subcmds="checkout status log diff output rm attach init help version completions"
             local branches=""
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
@@ -646,33 +929,42 @@ if [[ -n "$ZSH_VERSION" ]]; then
     autoload -U +X bashcompinit && bashcompinit
 fi
 complete -F _grove_completions grove
+complete -F _grove_completions gr
 COMP
 }
 
 cmd_help() {
     cat <<EOF
-$(echo -e "${BOLD}grove${NC}") — worktree + tmux environment manager (v${GROVE_VERSION})
+$(echo -e "${BOLD}grove${NC}") — agent-first worktree manager (v${GROVE_VERSION})
 
 $(echo -e "${BOLD}USAGE:${NC}")
-  grove <branch>               Create worktree + tmux session (idempotent)
-  grove <branch> --attach      Create and attach to session
-  grove attach <branch>        Attach to existing session
-  grove ls                     List worktrees + session status
-  grove rm <branch>            Kill session + remove worktree
-  grove rm --all               Remove everything (with confirmation)
+  gr checkout <branch>             Create worktree + start agent
+                                   (prompts for task, enter to skip)
+  gr <branch> "prompt"            Shorthand — skip the prompt step
+  gr status                       Show all worktrees, agents, activity
+  gr attach <branch>              Snap into a running agent session
+  gr log <branch>                 Agent's commits on this branch
+  gr diff <branch>                What the agent changed vs base
+  gr output <branch>              Show agent's terminal output
+  gr rm <branch>                  Kill agent + remove worktree
+  gr rm --all                     Remove everything (with confirmation)
 
 $(echo -e "${BOLD}OTHER:${NC}")
-  grove init                   Generate a Grovefile interactively
-  grove help                   Show this help
-  grove version                Show version
-  grove completions            Output shell completions
+  gr init                         Set up ~/.grove + Grovefile
+  gr help                         Show this help
+  gr version                      Show version
+  gr completions                  Output shell completions
 
 $(echo -e "${BOLD}CONFIGURATION:${NC}")
-  Create a Grovefile at your repo root (optional — grove works without one):
+  ~/.grove (global):
+    GROVE_AGENT="claude"
 
-    GROVE_PROJECT="myapp"        # defaults to repo dirname
-    grove_setup()   { npm install; }
-    grove_windows() { grove_window "server" "npm run dev"; }
+  Grovefile (per-repo, optional):
+    GROVE_PROJECT="myapp"
+    setup() { npm install; }
+
+$(echo -e "${BOLD}DETACH:${NC}")
+  Ctrl+\\  detach from a foreground agent session
 EOF
 }
 
@@ -684,7 +976,7 @@ main() {
     case "$cmd" in
         "")
             load_grovefile
-            cmd_ls
+            cmd_status
             ;;
         help|--help|-h)
             cmd_help
@@ -692,17 +984,38 @@ main() {
         version|--version|-v)
             echo "grove v${GROVE_VERSION}"
             ;;
-        ls|list)
+        checkout|co)
             load_grovefile
-            cmd_ls
+            if [[ -z "${2:-}" ]]; then
+                echo -e "${RED}Error:${NC} Missing branch name" >&2
+                echo "Usage: gr checkout <branch> [\"prompt\"]" >&2
+                exit 1
+            fi
+            cmd_checkout "${@:2}"
             ;;
-        rm|remove)
+        status|ls|list)
             load_grovefile
-            cmd_rm "${2:-}"
+            cmd_status
             ;;
         attach)
             load_grovefile
             cmd_attach "${2:-}"
+            ;;
+        log)
+            load_grovefile
+            cmd_log "${2:-}"
+            ;;
+        diff)
+            load_grovefile
+            cmd_diff "${2:-}"
+            ;;
+        output)
+            load_grovefile
+            cmd_output "${2:-}"
+            ;;
+        rm|remove)
+            load_grovefile
+            cmd_rm "${2:-}"
             ;;
         completions)
             cmd_completions
@@ -711,8 +1024,9 @@ main() {
             cmd_init
             ;;
         *)
+            # Catch-all: treat as branch name (shorthand for checkout)
             load_grovefile
-            cmd_open "$cmd" "${@:2}"
+            cmd_checkout "$cmd" "${@:2}"
             ;;
     esac
 }

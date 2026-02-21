@@ -6,15 +6,6 @@ GROVE_PROJECT="myapp"        # defaults to repo dirname
 
 # ─── Setup (runs once after worktree creation) ──────────────────────────────
 
-grove_setup() {
+setup() {
     npm install
-}
-
-# ─── tmux windows ───────────────────────────────────────────────────────────
-# Call grove_window <name> <command> for each window you want.
-# A "shell" window is always added automatically.
-
-grove_windows() {
-    grove_window "server" "npm run dev"
-    grove_window "ui"     "cd frontend && npm run dev"
 }
