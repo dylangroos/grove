@@ -446,7 +446,7 @@ cmd_checkout() {
             if [[ -t 0 ]]; then
                 echo -e "Attaching to agent in ${BOLD}$branch${NC}"
                 echo -e "  ${DIM}Detach with Ctrl+\\${NC}"
-                exec dtach -a "$socket" -z
+                exec dtach -a "$socket" -z -r ctrl_l
             else
                 echo -e "Agent running in ${BOLD}$branch${NC}"
                 echo -e "  Attach: ${DIM}gr attach $branch${NC}"
@@ -598,7 +598,7 @@ cmd_attach() {
         exit 1
     fi
 
-    exec dtach -a "$socket" -z
+    exec dtach -a "$socket" -z -r ctrl_l
 }
 
 cmd_log() {
