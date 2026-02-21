@@ -1,5 +1,9 @@
 # grove
 
+<p align="center">
+  <img src="docs/tree.svg" alt="grove" width="500">
+</p>
+
 Run coding agents in parallel across git worktrees.
 
 ```bash

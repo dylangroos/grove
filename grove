@@ -853,7 +853,7 @@ cmd_init() {
                 local flags_line
                 if IFS= read -r flags_line; then
                     if [[ -n "$flags_line" ]]; then
-                        printf 'GROVE_AGENT_FLAGS="%s"\n' "$flags_line" >> "$GROVE_CONFIG"
+                        echo "GROVE_AGENT_FLAGS=\"$flags_line\"" >> "$GROVE_CONFIG"
                     else
                         printf '# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default agent flags\n' >> "$GROVE_CONFIG"
                     fi
