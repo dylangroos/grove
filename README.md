@@ -18,10 +18,10 @@ gr rm feat/auth                 # kill agent + clean up
 
 ```bash
 curl -fsSL grove.wtf/install.sh | bash
-gr init
+grove init
 ```
 
-That's it. `gr init` walks you through picking your agent and setting up per-repo config. Run it again anytime to change settings.
+That's it. `grove init` walks you through picking your agent and setting up per-repo config. Run it again anytime to change settings.
 
 Works with Claude, Codex, Aider, or any CLI agent. Requires bash 4+, git, [dtach](https://github.com/cripty2001/dtach).
 
