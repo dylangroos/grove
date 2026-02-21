@@ -5,22 +5,28 @@ set -euo pipefail
 # ─── Install dtach if missing ────────────────────────────────────────────────
 
 if ! command -v dtach >/dev/null 2>&1; then
-    echo "Installing dtach..."
+    # Determine install command
+    DTACH_CMD=""
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update -qq && sudo apt-get install -y -qq dtach
+        DTACH_CMD="sudo apt-get update -qq && sudo apt-get install -y -qq dtach"
     elif command -v brew >/dev/null 2>&1; then
-        brew install dtach
+        DTACH_CMD="brew install dtach"
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --noconfirm dtach
+        DTACH_CMD="sudo pacman -S --noconfirm dtach"
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y dtach
+        DTACH_CMD="sudo dnf install -y dtach"
     elif command -v apk >/dev/null 2>&1; then
-        sudo apk add dtach
-    else
-        echo "Could not install dtach automatically."
+        DTACH_CMD="sudo apk add dtach"
+    fi
+
+    if [[ -z "$DTACH_CMD" ]]; then
+        echo "dtach is required but not installed."
         echo "Install it manually: https://github.com/cripty2001/dtach"
         exit 1
     fi
+
+    echo "Installing dtach..."
+    eval "$DTACH_CMD"
 fi
 
 # ─── Install grove ───────────────────────────────────────────────────────────

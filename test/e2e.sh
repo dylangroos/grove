@@ -701,7 +701,13 @@ test_status_shows_waiting() {
 
     # Backdate log file to simulate idle agent
     local log_file="$TEST_DIR/.worktrees/feat-auth/.grove-agent.log"
-    touch -d "1 minute ago" "$log_file" 2>/dev/null || touch -t "$(date -d '1 minute ago' +%Y%m%d%H%M.%S)" "$log_file" 2>/dev/null
+    local past
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        past="$(date -v-1M +%Y%m%d%H%M.%S)"
+    else
+        past="$(date -d '1 minute ago' +%Y%m%d%H%M.%S)"
+    fi
+    touch -t "$past" "$log_file" 2>/dev/null
 
     local output rc=0
     output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
