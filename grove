@@ -653,7 +653,7 @@ cmd_diff() {
         exit 1
     }
 
-    (cd "$wt_dir" && git diff "$base"..HEAD)
+    (cd "$wt_dir" && git diff "$base")
 }
 
 cmd_output() {
