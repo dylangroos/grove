@@ -1,6 +1,6 @@
 # grove
 
-Agent-first worktree manager. Spawn coding agents in git worktrees — snap in, snap out, let them work.
+Multi-agent worktree manager. Run coding agents in parallel across git worktrees — one command to spawn, monitor, and attach.
 
 ```bash
 gr checkout feat/auth "add auth"   # worktree + background agent
@@ -98,6 +98,16 @@ Run `gr init` to generate both interactively. Grove works with zero config on an
 ```bash
 eval "$(gr completions)"
 ```
+
+## Why grove?
+
+Most tools give you worktree isolation. Grove gives you worktree **orchestration**:
+
+- **Any agent** — Claude, Codex, Aider, or your own. Swap per-project or globally.
+- **One dashboard** — `gr status` shows every branch, agent, and state at a glance.
+- **Smart checkout** — auto-attaches, detects idle/busy, resumes prior sessions.
+- **Setup hooks** — `setup()` runs automatically so worktrees come up ready.
+- **Full lifecycle** — `gr rm`, `gr log`, `gr diff` per branch. One command to spawn, monitor, or tear down.
 
 ## License
 
