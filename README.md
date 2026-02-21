@@ -70,7 +70,10 @@ Set your coding agent. Created by `gr init` or write manually:
 
 ```bash
 GROVE_AGENT="claude"     # or codex, aider, etc.
+# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default agent flags
 ```
+
+**Agent flags:** Background agents can't ask for permission, so grove passes `--dangerously-skip-permissions` to Claude by default. Set `GROVE_AGENT_FLAGS` to override this — even `GROVE_AGENT_FLAGS=""` to run with no extra flags. When unset, smart defaults apply.
 
 ### `Grovefile` (per-repo, optional)
 

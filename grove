@@ -45,6 +45,8 @@ GROVE_PROJECT=""
 GROVE_WORKTREE_DIR=".worktrees"
 GROVE_CONFIG="$HOME/.grove"
 GROVE_AGENT=""
+GROVE_OS="linux"
+[[ "$(uname -s)" == "Darwin" ]] && GROVE_OS="darwin"
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -116,10 +118,24 @@ build_agent_cmd() {
         return 1
     fi
 
+    # Determine agent flags:
+    #   - If GROVE_AGENT_FLAGS is set (even to ""), use that value
+    #   - If unset, apply smart defaults (--dangerously-skip-permissions for claude)
+    local flags=""
+    if [[ -n "${GROVE_AGENT_FLAGS+x}" ]]; then
+        flags="$GROVE_AGENT_FLAGS"
+    else
+        case "$agent" in
+            claude) flags="--dangerously-skip-permissions" ;;
+        esac
+    fi
+
+    local cmd="$agent"
+    [[ -n "$flags" ]] && cmd="$cmd $flags"
+
     if [[ -n "$prompt" ]]; then
         case "$agent" in
             claude)
-                local cmd="claude --dangerously-skip-permissions"
                 [[ -n "$continue_mode" ]] && cmd="$cmd --continue"
                 echo "$cmd \"$prompt\""
                 ;;
@@ -130,7 +146,6 @@ build_agent_cmd() {
     else
         case "$agent" in
             claude)
-                local cmd="claude --dangerously-skip-permissions"
                 [[ -n "$continue_mode" ]] && cmd="$cmd --continue"
                 echo "$cmd"
                 ;;
@@ -171,6 +186,14 @@ is_agent_running() {
     return 0
 }
 
+file_mtime() {
+    if [[ "$GROVE_OS" == "darwin" ]]; then
+        stat -f %m "$1" 2>/dev/null
+    else
+        stat -c %Y "$1" 2>/dev/null
+    fi
+}
+
 get_agent_status() {
     local wt_dir="${1%/}"
     if ! is_agent_running "$wt_dir"; then
@@ -183,7 +206,7 @@ get_agent_status() {
     fi
     local now log_mtime age
     now="$(date +%s)"
-    log_mtime="$(stat -c %Y "$log_file" 2>/dev/null)" || log_mtime=0
+    log_mtime="$(file_mtime "$log_file")" || log_mtime=0
     age=$((now - log_mtime))
     if [[ "$age" -le 10 ]]; then
         echo "running"
@@ -224,6 +247,21 @@ kill_agent() {
         fi
 
         rm -f "$socket"
+    fi
+}
+
+launch_agent() {
+    local mode="$1" socket="$2" wt_dir="$3" agent_cmd="$4" log_file="$5"
+    local script_part
+    if [[ "$GROVE_OS" == "darwin" ]]; then
+        script_part="script -qa '$log_file' bash -c '$agent_cmd'"
+    else
+        script_part="script -aqfc '$agent_cmd' '$log_file'"
+    fi
+    if [[ "$mode" == "foreground" ]]; then
+        dtach -c "$socket" -z bash -c "cd \"$wt_dir\" && $script_part"
+    else
+        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && $script_part"
     fi
 }
 
@@ -306,9 +344,9 @@ get_diff_stat() {
 
     # Parse "3 files changed, 42 insertions(+), 8 deletions(-)"
     local files ins del
-    files="$(echo "$stat" | grep -oP '\d+ file' | grep -oP '\d+')" || files="0"
-    ins="$(echo "$stat" | grep -oP '\d+ insertion' | grep -oP '\d+')" || ins="0"
-    del="$(echo "$stat" | grep -oP '\d+ deletion' | grep -oP '\d+')" || del="0"
+    files="$(echo "$stat" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')" || files="0"
+    ins="$(echo "$stat" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')" || ins="0"
+    del="$(echo "$stat" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')" || del="0"
 
     echo "+${ins} -${del} (${files} files)"
 }
@@ -419,7 +457,7 @@ cmd_checkout() {
             kill_agent "$wt_dir"
             local agent_cmd
             agent_cmd="$(build_agent_cmd "$agent" "$prompt" "continue")"
-            dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+            launch_agent background "$socket" "$wt_dir" "$agent_cmd" "$log_file"
             echo -e "${GREEN}✓${NC} Agent restarted with --continue (background): ${BOLD}$agent${NC}"
             echo -e "  Prompt: ${DIM}\"$prompt\"${NC}"
             echo -e "  Attach: ${DIM}gr attach $branch${NC}"
@@ -443,7 +481,7 @@ cmd_checkout() {
 
     if [[ -n "$prompt" ]]; then
         # Background mode: dtach -n (no attach)
-        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+        launch_agent background "$socket" "$wt_dir" "$agent_cmd" "$log_file"
         echo -e "${GREEN}✓${NC} Agent started (background): ${BOLD}$agent${NC}"
         echo -e "  Prompt: ${DIM}\"$prompt\"${NC}"
         echo -e "  Attach: ${DIM}gr attach $branch${NC}"
@@ -451,10 +489,10 @@ cmd_checkout() {
         # Foreground mode: dtach -c (create and attach, needs TTY)
         echo -e "${GREEN}✓${NC} Starting agent: ${BOLD}$agent${NC}"
         echo -e "  ${DIM}Detach with Ctrl+\\${NC}"
-        dtach -c "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+        launch_agent foreground "$socket" "$wt_dir" "$agent_cmd" "$log_file"
     else
         # No TTY available — fall back to background
-        dtach -n "$socket" -z bash -c "cd \"$wt_dir\" && script -aqfc '$agent_cmd' \"$log_file\""
+        launch_agent background "$socket" "$wt_dir" "$agent_cmd" "$log_file"
         echo -e "${GREEN}✓${NC} Agent started (background): ${BOLD}$agent${NC}"
         echo -e "  Attach: ${DIM}gr attach $branch${NC}"
     fi
@@ -807,6 +845,25 @@ cmd_init() {
 
         if [[ -n "$agent_line" ]]; then
             printf 'GROVE_AGENT="%s"\n' "$agent_line" > "$GROVE_CONFIG"
+
+            # Prompt for agent flags (only for claude, which has smart defaults)
+            if [[ "$agent_line" == "claude" ]]; then
+                echo -e "${BOLD}Agent flags${NC} (claude runs with --dangerously-skip-permissions by default):"
+                printf "  Override flags (enter to keep defaults) > "
+                local flags_line
+                if IFS= read -r flags_line; then
+                    if [[ -n "$flags_line" ]]; then
+                        printf 'GROVE_AGENT_FLAGS="%s"\n' "$flags_line" >> "$GROVE_CONFIG"
+                    else
+                        printf '# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default agent flags\n' >> "$GROVE_CONFIG"
+                    fi
+                else
+                    printf '# GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default agent flags\n' >> "$GROVE_CONFIG"
+                fi
+            else
+                printf '# GROVE_AGENT_FLAGS=""  # override default agent flags\n' >> "$GROVE_CONFIG"
+            fi
+
             echo -e "${GREEN}✓${NC} Created ~/.grove"
             GROVE_AGENT="$agent_line"
         else
@@ -958,6 +1015,8 @@ $(echo -e "${BOLD}OTHER:${NC}")
 $(echo -e "${BOLD}CONFIGURATION:${NC}")
   ~/.grove (global):
     GROVE_AGENT="claude"
+    GROVE_AGENT_FLAGS="..."       Override flags passed to agent
+                                  (unset = smart defaults)
 
   Grovefile (per-repo, optional):
     GROVE_PROJECT="myapp"
