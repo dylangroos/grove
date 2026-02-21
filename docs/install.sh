@@ -33,4 +33,12 @@ if ! grep -qF '.local/bin' "$PROFILE" 2>/dev/null; then
     echo "$EXPORT_LINE" >> "$PROFILE"
 fi
 
+# Shell completions
+COMPLETION_LINE='eval "$(gr completions)"'
+if ! grep -qF 'gr completions' "$PROFILE" 2>/dev/null; then
+    echo "" >> "$PROFILE"
+    echo "# grove shell completions" >> "$PROFILE"
+    echo "$COMPLETION_LINE" >> "$PROFILE"
+fi
+
 echo "grove installed — open a new terminal to start using it"

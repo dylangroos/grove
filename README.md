@@ -1,12 +1,12 @@
 # grove
 
-The fastest way to branch off, work in isolation, and clean up. Git worktrees + tmux, nothing more.
+Multi-agent worktree manager. Run coding agents in parallel across git worktrees — one command to spawn, monitor, and attach.
 
 ```bash
-grove feat/auth          # create worktree + tmux session
-grove attach feat/auth   # get into the session
-grove ls                 # list worktrees + session status
-grove rm feat/auth       # kill session + remove worktree
+gr checkout feat/auth "add auth"   # worktree + background agent
+gr status                          # all worktrees, agents, activity
+gr attach feat/auth                # snap into the running agent
+gr rm feat/auth                    # kill agent + remove worktree
 ```
 
 ## Install
@@ -19,77 +19,95 @@ Or manually:
 
 ```bash
 git clone https://github.com/dylangroos/grove.git
-ln -sf "$(pwd)/grove/grove" ~/.local/bin/grove
+cd grove && bash install.sh
 ```
+
+**Dependencies:** bash 4+, git, [dtach](https://github.com/cripty2001/dtach) (`apt install dtach` / `brew install dtach`)
 
 ## Usage
 
 ```
-grove <branch>               Create worktree + tmux session (idempotent)
-grove <branch> --attach      Create and attach to session
-grove attach <branch>        Attach to existing session
-grove ls                     List worktrees + session status
-grove rm <branch>            Kill session + remove worktree
-grove rm --all               Remove everything (with confirmation)
-grove init                   Generate a Grovefile interactively
-grove help                   Help
-grove version                Version
+gr checkout <branch> "prompt"    Create worktree + run agent in background
+gr checkout <branch>             Create worktree + run agent interactively
+gr <branch> "prompt"             Shorthand for checkout
+gr status                        Show all worktrees, agents, activity
+gr attach <branch>               Snap into a running agent session
+gr log <branch>                  Agent's commits on this branch
+gr diff <branch>                 What the agent changed vs base
+gr rm <branch>                   Kill agent + remove worktree
+gr rm --all                      Remove everything (with confirmation)
+gr init                          Set up ~/.grove + Grovefile
+gr help                          Help
 ```
 
-`grove` with no args runs `grove ls`.
+`gr` with no args runs `gr status`. Detach from a foreground agent with `Ctrl+\`.
 
-### How `grove <branch>` works
+### How `gr checkout` works
 
-It's idempotent and non-blocking — always prints status and exits.
+Idempotent — safe to run multiple times:
 
-1. **No worktree?** Create it, run `grove_setup`, create tmux session. Print path + session name.
-2. **Worktree exists, no session?** Create the session. Print session name.
-3. **Session already running?** Print "already running" + session name.
+1. **No worktree?** Create it, run `setup`, start agent.
+2. **Worktree exists, no agent?** Start agent (resumes conversation if prior session).
+3. **Agent idle?** Auto-attach (no prompt) or restart with new prompt.
+4. **Agent busy?** Auto-attach (no prompt) or warn and suggest `gr attach`.
 
-To get into the session: `grove attach <branch>` or `grove <branch> --attach`.
+With a prompt → agent runs in background (`dtach -n`). Without → interactive foreground (`dtach -c`).
+
+### `gr status` output
+
+```
+BRANCH                  AGENT     STATUS     LAST ACTIVITY
+feat/auth               claude    running    3m ago · "add JWT middleware"
+fix/login               claude    waiting    "fix login redirect"
+refactor/db             claude    done       1h ago · "normalize schema"
+```
 
 ## Configuration
 
-Run `grove init` to generate a Grovefile interactively — it auto-detects your project type, installed coding agents (Claude, Codex, aider), and suggests defaults.
+### `~/.grove` (global)
 
-Or create a `Grovefile` at your repo root manually. It's entirely optional — grove works with zero config on any git repo.
+Set your coding agent. Created by `gr init` or write manually:
 
 ```bash
-# Grovefile
+GROVE_AGENT="claude"     # or codex, aider, etc.
+```
+
+### `Grovefile` (per-repo, optional)
+
+```bash
 GROVE_PROJECT="myapp"        # defaults to repo dirname
 
-grove_setup() {              # runs once after worktree creation
+setup() {              # runs once after worktree creation
     npm install
-}
-
-grove_windows() {            # define tmux windows
-    grove_window "server" "npm run dev"
-    grove_window "ui" "cd frontend && npm run dev"
-    grove_window "agent" "claude --dangerously-skip-permissions"
 }
 ```
 
-No Grovefile? `grove <branch>` still works — creates a worktree and opens a shell in tmux.
+Run `gr init` to generate both interactively. Grove works with zero config on any git repo.
 
-### Hooks
+### Supported agents
 
-| Hook | Called when | Purpose |
-|------|-----------|---------|
-| `grove_setup` | After worktree creation | Install dependencies (cwd = new worktree) |
-| `grove_windows` | Starting a tmux session | Define windows via `grove_window <name> <cmd>` |
+| Agent | With prompt | Without prompt |
+|-------|------------|----------------|
+| claude | `claude "prompt"` | `claude` |
+| codex | `codex "prompt"` | `codex` |
+| aider | `aider --message "prompt"` | `aider` |
+| other | `agent "prompt"` | `agent` |
 
 ### Shell completions
 
 ```bash
-# Add to .bashrc or .zshrc:
-eval "$(grove completions)"
+eval "$(gr completions)"
 ```
 
-## Requirements
+## Why grove?
 
-- bash 4+
-- git
-- tmux
+Most tools give you worktree isolation. Grove gives you worktree **orchestration**:
+
+- **Any agent** — Claude, Codex, Aider, or your own. Swap per-project or globally.
+- **One dashboard** — `gr status` shows every branch, agent, and state at a glance.
+- **Smart checkout** — auto-attaches, detects idle/busy, resumes prior sessions.
+- **Setup hooks** — `setup()` runs automatically so worktrees come up ready.
+- **Full lifecycle** — `gr rm`, `gr log`, `gr diff` per branch. One command to spawn, monitor, or tear down.
 
 ## License
 
