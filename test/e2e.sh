@@ -538,7 +538,7 @@ test_init_not_in_git_repo() {
     rm -f "$HOME/.grove"
 
     local output rc=0
-    output=$(printf '\n' | cd "$tmpdir" && PATH="/usr/bin:/bin:$PATH" "$GROVE_BIN" init 2>&1) || rc=$?
+    output=$(cd "$tmpdir" && printf '\n' | PATH="/usr/bin:/bin:$PATH" "$GROVE_BIN" init 2>&1) || rc=$?
 
     assert_exit 0 "$rc" "exit code"
     assert_contains "$output" "Not in a git repo" "shows not in git repo"
