@@ -194,6 +194,10 @@ file_mtime() {
     fi
 }
 
+strip_ansi() {
+    sed 's/\\x1b\\[[0-9;?]*[a-zA-Z]//g; s/\\x1b\\][^\\x07]*\\x07//g; s/\\x1b(B//g' | tr -d '\\r'
+}
+
 get_agent_status() {
     local wt_dir="${1%/}"
     if ! is_agent_running "$wt_dir"; then
@@ -204,14 +208,27 @@ get_agent_status() {
     if [[ ! -f "$log_file" ]]; then
         echo "running"; return 0
     fi
+
+    # Check last few lines for prompt patterns (permission prompts, confirmations)
+    local tail_lines
+    tail_lines="$(tail -5 "$log_file" 2>/dev/null | strip_ansi | LC_ALL=C tr -cd ' -~\\n')"
+    if echo "$tail_lines" | grep -qiE '(Allow|Deny|yes.*no|\\[Y/n\\]|\\[y/N\\]|approve|reject|Continue\\?|Do you want)'; then
+        echo "waiting"
+        return 0
+    fi
+
+    # Fall back to time-based detection
     local now log_mtime age
     now="$(date +%s)"
     log_mtime="$(file_mtime "$log_file")" || log_mtime=0
     age=$((now - log_mtime))
+
     if [[ "$age" -le 10 ]]; then
         echo "running"
+    elif [[ "$age" -le 120 ]]; then
+        echo "thinking"
     else
-        echo "waiting"
+        echo "idle"
     fi
 }
 
@@ -508,7 +525,7 @@ cmd_status() {
         return 0
     fi
 
-    printf "${DIM}%-24s %-10s %-10s %s${NC}\n" "BRANCH" "AGENT" "STATUS" "LAST ACTIVITY"
+    printf "${DIM}%-24s %-10s %-14s %s${NC}\n" "BRANCH" "AGENT" "STATUS" "ACTIVITY"
 
     for wt_dir in "$wt_base"/*/; do
         [[ -d "$wt_dir" ]] || continue
@@ -518,7 +535,7 @@ cmd_status() {
 
 cmd_status_single() {
     local wt_dir="$1"
-    local slug branch agent_name status_str activity
+    local slug branch agent_name status_str activity diff_stat
 
     slug="$(basename "$wt_dir")"
     branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$slug")"
@@ -530,45 +547,45 @@ cmd_status_single() {
     fi
     agent_name="${agent_name:-—}"
 
-    # Status
+    # Status with indicators
     local agent_status
     agent_status="$(get_agent_status "$wt_dir")"
     case "$agent_status" in
-        running) status_str="${GREEN}running${NC}" ;;
-        waiting) status_str="${YELLOW}waiting${NC}" ;;
-        *)       status_str="${DIM}done${NC}" ;;
+        running)  status_str="${GREEN}● running${NC}" ;;
+        thinking) status_str="${YELLOW}◐ thinking${NC}" ;;
+        waiting)  status_str="${RED}⚠ waiting${NC}" ;;
+        idle)     status_str="${DIM}○ idle${NC}" ;;
+        *)        status_str="${DIM}■ done${NC}" ;;
     esac
+
+    # Diff stats
+    diff_stat="$(get_diff_stat "$wt_dir" 2>/dev/null)" || diff_stat=""
 
     # Last activity
     activity="$(get_last_activity "$wt_dir" 2>/dev/null)" || activity=""
 
-    # If done, try to show diff stat instead
-    if [[ "$agent_status" == "done" ]] && [[ -z "$activity" ]]; then
-        activity=""
-    fi
-
-    # Try agent log output
     if [[ -z "$activity" ]]; then
         activity="$(get_log_activity "$wt_dir" 2>/dev/null)" || activity=""
     fi
 
-    # Prompt info
+    # Prompt info fallback
     local prompt_file
     prompt_file="$(grove_prompt_path "$wt_dir")"
-    if [[ -n "$activity" ]]; then
-        : # already have activity
-    elif [[ -f "$prompt_file" ]]; then
+    if [[ -z "$activity" && -f "$prompt_file" ]]; then
         local saved_prompt
         saved_prompt="$(cat "$prompt_file")"
         activity="\"${saved_prompt}\""
     fi
 
+    # Print row
     printf "%-24s %-10s " "$branch" "$agent_name"
     printf "%b" "$status_str"
-    # Pad status column (account for color codes)
     printf "%-4s" ""
+    if [[ -n "$diff_stat" ]]; then
+        printf " ${DIM}%s${NC}" "$diff_stat"
+    fi
     if [[ -n "$activity" ]]; then
-        echo -e " $activity"
+        echo -e "  $activity"
     else
         echo
     fi
