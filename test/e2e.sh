@@ -754,6 +754,92 @@ test_checkout_continue_after_done() {
     cleanup
 }
 
+test_send_missing_args() {
+    echo -e "${BOLD}32. send missing args${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove send 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code: no branch"
+    assert_contains "$output" "Missing branch name" "error: no branch"
+
+    rc=0
+    output=$(./grove send feat/auth 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code: no text"
+    assert_contains "$output" "Missing text" "error: no text"
+
+    cleanup
+}
+
+test_send_no_worktree() {
+    echo -e "${BOLD}33. send no worktree${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove send nonexistent "hello" 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "No worktree" "error message"
+
+    cleanup
+}
+
+test_send_no_running_agent() {
+    echo -e "${BOLD}34. send no running agent${NC}"
+    setup_test_repo
+
+    # Create worktree without agent
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+
+    local output rc=0
+    output=$(./grove send feat/auth "hello" 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "No running agent" "error message"
+
+    cleanup
+}
+
+test_approve_missing_args() {
+    echo -e "${BOLD}35. approve missing args${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove approve 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "Missing branch name" "error message"
+
+    cleanup
+}
+
+test_approve_all_none_waiting() {
+    echo -e "${BOLD}36. approve --all with none waiting${NC}"
+    setup_test_repo
+
+    # Create a worktree so the "No worktrees" early-return path is not hit
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+
+    local output rc=0
+    output=$(./grove approve --all 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "No agents waiting" "no agents message"
+
+    cleanup
+}
+
+test_help_shows_send_approve() {
+    echo -e "${BOLD}37. help shows send and approve${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove help 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "send" "help shows send"
+    assert_contains "$output" "approve" "help shows approve"
+
+    cleanup
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 main() {
@@ -805,6 +891,12 @@ main() {
     test_checkout_auto_attach
     test_status_shows_waiting
     test_checkout_continue_after_done
+    test_send_missing_args
+    test_send_no_worktree
+    test_send_no_running_agent
+    test_approve_missing_args
+    test_approve_all_none_waiting
+    test_help_shows_send_approve
 
     # Restore ~/.grove
     if [[ -n "$SAVED_GROVE_CONFIG" ]]; then
