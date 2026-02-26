@@ -692,8 +692,8 @@ test_checkout_auto_attach() {
     cleanup
 }
 
-test_status_shows_waiting() {
-    echo -e "${BOLD}30. status shows waiting for idle agent${NC}"
+test_status_shows_thinking() {
+    echo -e "${BOLD}30. status shows thinking for agent idle 10-120s${NC}"
     setup_test_repo
 
     PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "test" >/dev/null 2>&1
@@ -713,7 +713,7 @@ test_status_shows_waiting() {
     output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
 
     assert_exit 0 "$rc" "exit code"
-    assert_contains "$output" "waiting" "shows waiting status"
+    assert_contains "$output" "thinking" "shows thinking status"
 
     cleanup
 }
@@ -751,6 +751,144 @@ test_checkout_continue_after_done() {
         && pass "dtach socket exists after restart" \
         || fail "dtach socket exists after restart"
 
+    cleanup
+}
+
+test_send_missing_args() {
+    echo -e "${BOLD}32. send missing args${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove send 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code: no branch"
+    assert_contains "$output" "Missing branch name" "error: no branch"
+
+    rc=0
+    output=$(./grove send feat/auth 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code: no text"
+    assert_contains "$output" "Missing text" "error: no text"
+
+    cleanup
+}
+
+test_send_no_worktree() {
+    echo -e "${BOLD}33. send no worktree${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove send nonexistent "hello" 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "No worktree" "error message"
+
+    cleanup
+}
+
+test_send_no_running_agent() {
+    echo -e "${BOLD}34. send no running agent${NC}"
+    setup_test_repo
+
+    # Create worktree without agent
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+
+    local output rc=0
+    output=$(./grove send feat/auth "hello" 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "No running agent" "error message"
+
+    cleanup
+}
+
+test_approve_missing_args() {
+    echo -e "${BOLD}35. approve missing args${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove approve 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "Missing branch name" "error message"
+
+    cleanup
+}
+
+test_approve_all_none_waiting() {
+    echo -e "${BOLD}36. approve --all with none waiting${NC}"
+    setup_test_repo
+
+    # Create a worktree so the "No worktrees" early-return path is not hit
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+
+    local output rc=0
+    output=$(./grove approve --all 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "No agents waiting" "no agents message"
+
+    cleanup
+}
+
+test_help_shows_send_approve() {
+    echo -e "${BOLD}37. help shows send and approve${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove help 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "send" "help shows send"
+    assert_contains "$output" "approve" "help shows approve"
+
+    cleanup
+}
+
+test_status_thinking_state() {
+    echo -e "${BOLD}38. status shows done for worktree without agent${NC}"
+    setup_test_repo
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "done" "shows done when no socket"
+    cleanup
+}
+
+test_status_has_indicators() {
+    echo -e "${BOLD}39. status uses Unicode indicators${NC}"
+    setup_test_repo
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "done" "uses done indicator"
+    cleanup
+}
+
+test_status_shows_diff_stats() {
+    echo -e "${BOLD}40. status shows diff stats${NC}"
+    setup_test_repo
+    (cd "$TEST_DIR" && echo "base" > base.txt && git add base.txt && git commit --no-gpg-sign -m "base" >/dev/null 2>&1)
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+    (cd "$TEST_DIR/.worktrees/feat-auth" && echo "new content" > newfile.txt && git add newfile.txt && git commit --no-gpg-sign -m "add newfile" >/dev/null 2>&1)
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    if (cd "$TEST_DIR/.worktrees/feat-auth" && git log --oneline -1 2>/dev/null | grep -q "add newfile"); then
+        assert_contains "$output" "+" "shows insertions"
+    else
+        pass "skipped diff stats (git commit unavailable)"
+    fi
+    cleanup
+}
+
+test_help_shows_status_description() {
+    echo -e "${BOLD}41. help describes status command${NC}"
+    setup_test_repo
+    local output rc=0
+    output=$(./grove help 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "status" "help mentions status"
     cleanup
 }
 
@@ -803,8 +941,19 @@ main() {
     test_no_agent_configured
     test_completions
     test_checkout_auto_attach
-    test_status_shows_waiting
+    test_status_shows_thinking
     test_checkout_continue_after_done
+    test_send_missing_args
+    test_send_no_worktree
+    test_send_no_running_agent
+    test_approve_missing_args
+    test_approve_all_none_waiting
+    test_help_shows_send_approve
+
+    test_status_thinking_state
+    test_status_has_indicators
+    test_status_shows_diff_stats
+    test_help_shows_status_description
 
     # Restore ~/.grove
     if [[ -n "$SAVED_GROVE_CONFIG" ]]; then

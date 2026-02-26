@@ -194,6 +194,10 @@ file_mtime() {
     fi
 }
 
+strip_ansi() {
+    sed 's/\\x1b\\[[0-9;?]*[a-zA-Z]//g; s/\\x1b\\][^\\x07]*\\x07//g; s/\\x1b(B//g' | tr -d '\\r'
+}
+
 get_agent_status() {
     local wt_dir="${1%/}"
     if ! is_agent_running "$wt_dir"; then
@@ -204,14 +208,27 @@ get_agent_status() {
     if [[ ! -f "$log_file" ]]; then
         echo "running"; return 0
     fi
+
+    # Check last few lines for prompt patterns (permission prompts, confirmations)
+    local tail_lines
+    tail_lines="$(tail -5 "$log_file" 2>/dev/null | strip_ansi | LC_ALL=C tr -cd ' -~\\n')"
+    if echo "$tail_lines" | grep -qiE '(Allow|Deny|yes.*no|\\[Y/n\\]|\\[y/N\\]|approve|reject|Continue\\?|Do you want)'; then
+        echo "waiting"
+        return 0
+    fi
+
+    # Fall back to time-based detection
     local now log_mtime age
     now="$(date +%s)"
     log_mtime="$(file_mtime "$log_file")" || log_mtime=0
     age=$((now - log_mtime))
+
     if [[ "$age" -le 10 ]]; then
         echo "running"
+    elif [[ "$age" -le 120 ]]; then
+        echo "thinking"
     else
-        echo "waiting"
+        echo "idle"
     fi
 }
 
@@ -508,7 +525,7 @@ cmd_status() {
         return 0
     fi
 
-    printf "${DIM}%-24s %-10s %-10s %s${NC}\n" "BRANCH" "AGENT" "STATUS" "LAST ACTIVITY"
+    printf "${DIM}%-24s %-10s %-14s %s${NC}\n" "BRANCH" "AGENT" "STATUS" "ACTIVITY"
 
     for wt_dir in "$wt_base"/*/; do
         [[ -d "$wt_dir" ]] || continue
@@ -518,7 +535,7 @@ cmd_status() {
 
 cmd_status_single() {
     local wt_dir="$1"
-    local slug branch agent_name status_str activity
+    local slug branch agent_name status_str activity diff_stat
 
     slug="$(basename "$wt_dir")"
     branch="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$slug")"
@@ -530,45 +547,45 @@ cmd_status_single() {
     fi
     agent_name="${agent_name:-—}"
 
-    # Status
+    # Status with indicators
     local agent_status
     agent_status="$(get_agent_status "$wt_dir")"
     case "$agent_status" in
-        running) status_str="${GREEN}running${NC}" ;;
-        waiting) status_str="${YELLOW}waiting${NC}" ;;
-        *)       status_str="${DIM}done${NC}" ;;
+        running)  status_str="${GREEN}● running${NC}" ;;
+        thinking) status_str="${YELLOW}◐ thinking${NC}" ;;
+        waiting)  status_str="${RED}⚠ waiting${NC}" ;;
+        idle)     status_str="${DIM}○ idle${NC}" ;;
+        *)        status_str="${DIM}■ done${NC}" ;;
     esac
+
+    # Diff stats
+    diff_stat="$(get_diff_stat "$wt_dir" 2>/dev/null)" || diff_stat=""
 
     # Last activity
     activity="$(get_last_activity "$wt_dir" 2>/dev/null)" || activity=""
 
-    # If done, try to show diff stat instead
-    if [[ "$agent_status" == "done" ]] && [[ -z "$activity" ]]; then
-        activity=""
-    fi
-
-    # Try agent log output
     if [[ -z "$activity" ]]; then
         activity="$(get_log_activity "$wt_dir" 2>/dev/null)" || activity=""
     fi
 
-    # Prompt info
+    # Prompt info fallback
     local prompt_file
     prompt_file="$(grove_prompt_path "$wt_dir")"
-    if [[ -n "$activity" ]]; then
-        : # already have activity
-    elif [[ -f "$prompt_file" ]]; then
+    if [[ -z "$activity" && -f "$prompt_file" ]]; then
         local saved_prompt
         saved_prompt="$(cat "$prompt_file")"
         activity="\"${saved_prompt}\""
     fi
 
+    # Print row
     printf "%-24s %-10s " "$branch" "$agent_name"
     printf "%b" "$status_str"
-    # Pad status column (account for color codes)
     printf "%-4s" ""
+    if [[ -n "$diff_stat" ]]; then
+        printf " ${DIM}%s${NC}" "$diff_stat"
+    fi
     if [[ -n "$activity" ]]; then
-        echo -e " $activity"
+        echo -e "  $activity"
     else
         echo
     fi
@@ -682,6 +699,85 @@ cmd_output() {
     fi
 
     cat "$log_file"
+}
+
+cmd_send() {
+    local branch="${1:-}"
+    local text="${2:-}"
+
+    if [[ -z "$branch" ]]; then
+        echo -e "${RED}Error:${NC} Missing branch name" >&2
+        echo "Usage: gr send <branch> <text>" >&2
+        exit 1
+    fi
+
+    if [[ -z "$text" ]]; then
+        echo -e "${RED}Error:${NC} Missing text to send" >&2
+        echo "Usage: gr send <branch> <text>" >&2
+        exit 1
+    fi
+
+    local slug wt_dir socket
+    slug="$(slugify_branch "$branch")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+    socket="$(grove_socket_path "$wt_dir")"
+
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} No worktree for '$branch'" >&2
+        exit 1
+    fi
+
+    if ! is_agent_running "$wt_dir"; then
+        echo -e "${RED}Error:${NC} No running agent for '$branch'" >&2
+        exit 1
+    fi
+
+    # Write to dtach socket using -p flag
+    printf '%s\n' "$text" | dtach -p "$socket"
+    echo -e "${GREEN}✓${NC} Sent to $branch"
+}
+
+cmd_approve() {
+    local target="${1:-}"
+
+    if [[ "$target" == "--all" ]]; then
+        local wt_base="$GROVE_ROOT/$GROVE_WORKTREE_DIR"
+        local approved=0
+
+        if [[ ! -d "$wt_base" ]] || [[ -z "$(ls -A "$wt_base" 2>/dev/null)" ]]; then
+            echo -e "${DIM}No worktrees${NC}"
+            return 0
+        fi
+
+        for wt_dir in "$wt_base"/*/; do
+            [[ -d "$wt_dir" ]] || continue
+            local status
+            status="$(get_agent_status "$wt_dir")"
+            if [[ "$status" == "waiting" ]]; then
+                local socket branch_name
+                socket="$(grove_socket_path "$wt_dir")"
+                branch_name="$(cd "$wt_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || basename "$wt_dir")"
+                printf 'y\n' | dtach -p "$socket"
+                echo -e "${GREEN}✓${NC} Approved: $branch_name"
+                approved=$((approved + 1))
+            fi
+        done
+
+        if [[ "$approved" -eq 0 ]]; then
+            echo -e "${DIM}No agents waiting for approval${NC}"
+        fi
+        return 0
+    fi
+
+    if [[ -z "$target" ]]; then
+        echo -e "${RED}Error:${NC} Missing branch name" >&2
+        echo "Usage: gr approve <branch>" >&2
+        echo "       gr approve --all" >&2
+        exit 1
+    fi
+
+    # Single branch approve = send "y"
+    cmd_send "$target" "y"
 }
 
 cmd_rm() {
@@ -950,7 +1046,7 @@ _grove_completions() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     case "$prev" in
-        attach|rm|log|diff|output|checkout|co)
+        attach|rm|log|diff|output|checkout|co|send|approve)
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
             if [[ -d "$wt_base" ]]; then
@@ -967,7 +1063,7 @@ _grove_completions() {
             fi
             ;;
         grove|gr)
-            local subcmds="checkout status log diff output rm attach init help version completions"
+            local subcmds="checkout status log diff output send approve rm attach init help version completions"
             local branches=""
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
@@ -1002,6 +1098,9 @@ $(echo -e "${BOLD}USAGE:${NC}")
   gr log <branch>                 Agent's commits on this branch
   gr diff <branch>                What the agent changed vs base
   gr output <branch>              Show agent's terminal output
+  gr send <branch> <text>          Send input to a running agent
+  gr approve <branch>              Approve a waiting agent prompt
+  gr approve --all                 Approve all waiting agents
   gr rm <branch>                  Kill agent + remove worktree
   gr rm --all                     Remove everything (with confirmation)
 
@@ -1074,6 +1173,14 @@ main() {
         rm|remove)
             load_grovefile
             cmd_rm "${2:-}"
+            ;;
+        send)
+            load_grovefile
+            cmd_send "${2:-}" "${3:-}"
+            ;;
+        approve)
+            load_grovefile
+            cmd_approve "${2:-}"
             ;;
         completions)
             cmd_completions
