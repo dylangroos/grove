@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Grove — Dev environments for humans and agents</title>
-  <meta name="description" content="Grove is the fastest way to branch off, work in isolation, and clean up. Git worktrees + tmux, nothing more.">
+  <title>Grove — Run coding agents in parallel</title>
+  <meta name="description" content="Grove spawns coding agents in git worktrees. Each agent gets its own branch. Snap in, snap out, let them work.">
   <meta name="theme-color" content="#4caf50">
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Grove — Dev environments for humans and agents">
-  <meta property="og:description" content="Git worktrees + tmux. Branch name in, environment out. No config required.">
+  <meta property="og:title" content="Grove — Run coding agents in parallel">
+  <meta property="og:description" content="Spawn coding agents in git worktrees. Each agent gets its own branch. Snap in, snap out, let them work.">
   <meta property="og:url" content="https://grove.wtf">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="grove.wtf">
@@ -19,8 +19,8 @@
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Grove — Dev environments for humans and agents">
-  <meta name="twitter:description" content="Git worktrees + tmux. Branch name in, environment out. No config required.">
+  <meta name="twitter:title" content="Grove — Run coding agents in parallel">
+  <meta name="twitter:description" content="Spawn coding agents in git worktrees. Each agent gets its own branch. Snap in, snap out, let them work.">
   <meta name="twitter:image" content="https://grove.wtf/og.png">
 
   <!-- Favicon -->
@@ -359,7 +359,7 @@
     <div class="logo">grove<span>.wtf</span></div>
     <div class="nav-links">
       <a href="https://github.com/dylangroos/grove" target="_blank">GitHub</a>
-      <a href="#grovefile">Docs</a>
+      <a href="#how-it-works">How it works</a>
       <a href="#install">Install</a>
     </div>
   </nav>
@@ -386,87 +386,101 @@
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠉⠉⡉⠉⠁⠀⠀⠘⠓⠀⠀⠀⠀⠀⣀⣞⡿⡉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠹⣶⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀</div>
 
-      <h1 class="tagline">Branch off. Work in isolation. Clean up.</h1>
-      <p class="subtitle">Git worktrees + tmux. Branch name in, environment out. No config required.</p>
+      <h1 class="tagline">Run coding agents in parallel.</h1>
+      <p class="subtitle">Each agent gets its own branch and worktree. Snap in to check on it, snap out, let it work.</p>
 
       <div class="install-cmd" id="install" onclick="copyInstall(this)">
         <span class="prompt">$ </span><span class="cmd-text">curl -fsSL grove.wtf/install.sh | bash</span>
       </div>
-      <div class="requirements">requires bash 4+ · git · tmux</div>
+      <div class="requirements" style="margin-top: 0.75rem;">then run <span style="color: var(--accent-bright);">grove init</span> to pick your agent · requires bash 4+ · git · dtach</div>
 
       <div class="scroll-hint" aria-hidden="true">&#8964;</div>
     </section>
 
     <section class="features" id="features">
       <div class="feature">
-        <div class="feature-title">Branch = environment</div>
-        <div class="feature-desc">grove feat/auth creates a worktree and tmux session. Branch name in, isolated environment out. No instance numbers, no slot management.</div>
+        <div class="feature-title">One command, one agent</div>
+        <div class="feature-desc">gr feat/auth "add JWT auth" creates a branch, a worktree, and starts your agent with that prompt. Background by default.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Zero config</div>
-        <div class="feature-desc">Works on any git repo with no setup. Add a Grovefile for setup hooks and tmux windows when you want them.</div>
+        <div class="feature-title">Snap in, snap out</div>
+        <div class="feature-desc">gr attach feat/auth drops you into the agent session. Ctrl+\ detaches. The agent keeps working while you're gone.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Idempotent</div>
-        <div class="feature-desc">Run grove feat/auth ten times — it creates what's missing, skips what exists, and prints status. Safe for scripts, CI, and agents.</div>
+        <div class="feature-title">See everything at a glance</div>
+        <div class="feature-desc">gr status shows every worktree, which agent is running, and what it last committed. One screen, all your agents.</div>
       </div>
       <div class="feature">
-        <div class="feature-title">Seven commands</div>
-        <div class="feature-desc">grove, attach, ls, rm, init, help, version. One mental model. Nothing to memorize, nothing to configure.</div>
+        <div class="feature-title">Git commands you know</div>
+        <div class="feature-desc">checkout, status, log, diff, rm. Same words, same muscle memory. No new mental model to learn.</div>
       </div>
     </section>
 
-    <h2 class="section-heading" id="grovefile">Configure with a Grovefile</h2>
+    <h2 class="section-heading" id="how-it-works">How it works</h2>
     <div class="demo">
-<span class="prompt">$ </span><span class="cmd">grove init</span>
-<span class="output">Detected: node (pnpm)
+<span class="comment"># Start an agent on a new branch (runs in background)</span>
+<span class="prompt">$ </span><span class="cmd">gr checkout feat/auth "add JWT middleware"</span>
+<span class="output">Creating worktree: feat/auth
+  Branch 'feat/auth' not found, creating from current HEAD
 
+&#10003; Worktree created: .worktrees/feat-auth
+&#10003; Agent started (background): claude
+  Prompt: "add JWT middleware"
+  Attach: gr attach feat/auth</span>
+
+<span class="comment"># Start another one</span>
+<span class="prompt">$ </span><span class="cmd">gr fix/login "fix the redirect loop on login"</span>
+<span class="output">&#10003; Worktree created: .worktrees/fix-login
+&#10003; Agent started (background): claude</span>
+
+<span class="comment"># See what's happening</span>
+<span class="prompt">$ </span><span class="cmd">gr status</span>
+<span class="output">BRANCH                  AGENT     STATUS     LAST ACTIVITY
+feat/auth               claude    running    3m ago · "add JWT middleware"
+fix/login               claude    waiting    "fix redirect loop"</span>
+
+<span class="comment"># Snap into an agent</span>
+<span class="prompt">$ </span><span class="cmd">gr attach feat/auth</span>
+<span class="output">(you're now inside the agent session — Ctrl+\ to detach)</span>
+
+<span class="comment"># See what the agent changed</span>
+<span class="prompt">$ </span><span class="cmd">gr log feat/auth</span>
+<span class="output">a1b2c3d add JWT middleware and auth routes
+f4e5d6c add token validation helper</span>
+
+<span class="comment"># Done — kill agent, remove worktree</span>
+<span class="prompt">$ </span><span class="cmd">gr rm feat/auth</span>
+<span class="output">Agent killed
+&#10003; Removed: feat-auth</span></div>
+
+    <h2 class="section-heading" id="config">Configuration</h2>
+    <div class="demo">
+<span class="comment"># Run gr init to set up both files interactively</span>
+<span class="prompt">$ </span><span class="cmd">gr init</span>
+<span class="output">Global config (~/.grove)
+Agent (coding agent to use):
+  [claude] >
+
+&#10003; Created ~/.grove
+
+Detected: node (pnpm)
 Setup (runs once per worktree, empty line to skip):
   [pnpm install] >
-  >
-
-Windows (each gets a tmux window, empty line to skip):
-  [pnpm run dev] >
-  >
-
-Agent (runs in its own window, empty line to skip):
-  [claude --dangerously-skip-permissions] >
 
 &#10003; Created Grovefile</span></div>
 
     <div class="demo">
-<span class="comment"># Grovefile — drop in your repo root, or run grove init</span>
+<span class="comment"># ~/.grove — pick your agent (global, all repos)</span>
+GROVE_AGENT=<span class="string">"claude"</span>
+<span class="comment"># GROVE_AGENT_FLAGS="--dangerously-skip-permissions"  # override default flags</span>
 
-<span class="func">grove_setup</span>() {
+<span class="comment"># Grovefile — per-repo setup (optional)</span>
+GROVE_PROJECT=<span class="string">"myapp"</span>
+
+<span class="func">setup</span>() {
     npm install
-}
-
-<span class="func">grove_windows</span>() {
-    grove_window <span class="string">"server"</span> <span class="string">"npm run dev"</span>
-    grove_window <span class="string">"ui"</span>     <span class="string">"cd frontend && npm run dev"</span>
-    grove_window <span class="string">"agent"</span>  <span class="string">"claude --dangerously-skip-permissions"</span>
 }</div>
 
-    <div class="demo">
-<span class="prompt">$ </span><span class="cmd">grove feat/auth-flow</span>
-<span class="output">Creating worktree: feat/auth-flow
-  Branch 'feat/auth-flow' not found, creating from current HEAD
-
-Running setup...
-
-✓ Worktree created: .worktrees/feat-auth-flow
-✓ Session started: grove-myapp-feat-auth-flow
-  Attach: grove attach feat/auth-flow</span>
-
-<span class="prompt">$ </span><span class="cmd">grove ls</span>
-<span class="output">BRANCH                         SESSION
-feat/auth-flow                 detached
-fix/login-bug                  attached
-refactor/api                   -</span>
-
-<span class="prompt">$ </span><span class="cmd">grove rm feat/auth-flow</span>
-<span class="output">Session killed: grove-myapp-feat-auth-flow
-✓ Removed: feat-auth-flow</span></div>
   </main>
 
   <footer>
