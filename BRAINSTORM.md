@@ -1,386 +1,407 @@
-# Grove TUI — Interface Brainstorm
+# Grove — Architecture Brainstorm
 
-Grove already solves the plumbing: git worktrees + tmux sessions, configured
-via a Grovefile. Everybody in the multi-agent space (Claude Squad, Multiclaude,
-Superset, Orchestra, Conduit) converges on the same architecture. What nobody
-has nailed yet is the interface layer.
+A grove of agents. Easy to check in on any of them. Human in the loop when you
+want to be, autonomous when you don't.
 
-This doc explores what a Grove TUI could look like.
-
----
-
-## The landscape (as of Feb 2026)
-
-Every tool in this space uses **tmux + git worktrees**. The differentiators are:
-
-| Tool          | Lang | Session  | TUI?    | Differentiator                         |
-|---------------|------|----------|---------|----------------------------------------|
-| Claude Squad  | Go   | tmux     | Yes     | Most popular, agent-agnostic           |
-| Multiclaude   | Go   | tmux     | No      | "Brownian ratchet" — chaos + CI        |
-| Superset      | ?    | tmux     | Desktop | Desktop app, diff viewer               |
-| Orchestra     | Rust | tmux     | Yes     | Fast, minimal                          |
-| Conduit       | ?    | ?        | Yes     | Tab-based, token tracking              |
-| Agent Deck    | ?    | tmux     | Yes     | MCP socket pooling                     |
-| **Grove**     | Bash | tmux     | **No**  | Grovefile convention, zero-dep plumbing|
-
-Grove's current advantage: it's the simplest, most Unix-y option. A single
-bash script. No runtime, no build step, no framework. The question is whether
-to keep that purity or build a proper TUI on top.
+Core engine first. Attach a TUI if you want. Attach a web UI if you want.
+The engine is the product.
 
 ---
 
-## Core question: what layer is the TUI?
+## What Grove is
 
-Two options:
+Grove manages a **grove of agents** — each running in its own isolated
+worktree, each in its own detached session. You can:
 
-### Option A: TUI as a separate binary, grove stays as-is
+- Spin up agents on branches
+- See what they're all doing at a glance
+- Drop into any one of them to steer, approve, or course-correct
+- Leave them running while you do something else
+- Review what they've produced (diffs, not vibes)
 
-```
-grove                    # the bash script (plumbing)
-grove-tui / grove ui     # the TUI (porcelain)
-```
-
-`grove` remains the workhorse. The TUI is a thin layer that calls `grove`
-commands and reads state from the filesystem (worktree dirs, tmux/dtach
-sessions). Users who don't want the TUI lose nothing.
-
-Pros: grove stays simple, TUI is optional, clean separation
-Cons: two binaries, coordination between them
-
-### Option B: TUI built into grove
-
-`grove` gains a `grove ui` subcommand (or `grove` with no args becomes the
-TUI). Everything in one binary.
-
-Pros: single install, single tool
-Cons: forces a language change (bash can't do a real TUI), the binary gets big
-
-**Recommendation: Option A.** Keep grove as bash plumbing. Build the TUI as a
-separate thing that consumes grove's conventions (worktree dirs, session
-naming, Grovefile).
+It's a process supervisor for coding agents. Like pm2 or supervisord, but
+purpose-built for the agent-per-branch workflow.
 
 ---
 
-## dtach vs tmux
-
-### Why consider dtach?
-
-tmux does way more than multi-agent orchestration needs. For agent sessions you
-typically need three things:
-
-1. **Detach/reattach** — run an agent in the background, come back later
-2. **Screen capture** — peek at what an agent is doing without attaching
-3. **Keystroke injection** — send `y\n` to accept a prompt, nudge an idle agent
-
-tmux gives you all three out of the box. dtach gives you (1) and nothing else.
-
-But tmux pays a tax: it interposes a terminal emulator between the app and
-your real terminal. This means:
-- `TERM` changes to `tmux-256color`
-- Escape sequences get translated (lossy)
-- Features like kitty keyboard protocol, OSC sequences, etc. break
-- Memory overhead per session
-
-dtach forwards raw bytes over a Unix socket. No terminal emulation. No
-overhead. The app talks directly to your terminal.
-
-### The missing pieces with dtach
-
-**Screen capture:** dtach doesn't maintain a screen buffer. You can't
-`capture-pane`. But you could:
-- Run a lightweight VT parser in the TUI process that taps the dtach socket
-  and maintains a virtual screen buffer per session
-- Use this for previews/status without attaching
-- Libraries: vterm (C), vt100 (Rust), node-pty + xterm.js, etc.
-
-**Keystroke injection:** dtach doesn't have `send-keys`. But the Unix socket
-is bidirectional. You can:
-- Open the dtach socket and write bytes directly
-- This is actually simpler than tmux's `send-keys` — no escaping, no
-  target specifiers, just raw terminal input
-
-### Architecture with dtach
+## Architecture: engine + clients
 
 ```
-                     ┌──────────────────────────────────┐
-                     │           grove-tui              │
-                     │                                  │
-                     │  ┌──────────┐  ┌──────────────┐  │
-                     │  │ session  │  │  VT parser   │  │
-                     │  │ list     │  │  (per agent) │  │
-                     │  │          │  │              │  │
-                     │  │ > agent1 │  │  captures    │  │
-                     │  │   agent2 │  │  screen for  │  │
-                     │  │   agent3 │  │  preview     │  │
-                     │  └──────────┘  └──────────────┘  │
-                     │         │              │         │
-                     │         │    attach    │  read   │
-                     │         ▼              ▼         │
-                     └─────────┬──────────────┬────────┘
-                               │              │
-               ┌───────────────┼──────────────┼───────────┐
-               │               │              │           │
-        ┌──────▼──────┐ ┌──────▼──────┐ ┌────▼────────┐  │
-        │  dtach sock │ │  dtach sock │ │  dtach sock │  │
-        │  /tmp/grove │ │  /tmp/grove │ │  /tmp/grove │  │
-        │  /agent1    │ │  /agent2    │ │  /agent3    │  │
-        └──────┬──────┘ └──────┬──────┘ └─────┬───────┘  │
-               │               │              │           │
-        ┌──────▼──────┐ ┌──────▼──────┐ ┌────▼────────┐  │
-        │   claude    │ │   claude    │ │   aider     │  │
-        │   (agent)   │ │   (agent)   │ │   (agent)   │  │
-        └─────────────┘ └─────────────┘ └─────────────┘  │
-               │               │              │           │
-        ┌──────▼──────┐ ┌──────▼──────┐ ┌────▼────────┐  │
-        │  worktree/  │ │  worktree/  │ │  worktree/  │  │
-        │  agent1     │ │  agent2     │ │  agent3     │  │
-        └─────────────┘ └─────────────┘ └─────────────┘  │
-               git worktrees (.worktrees/)                │
-               ───────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                          clients                                │
+│                                                                 │
+│   grove cli        grove tui        grove web        your app   │
+│   (bash)           (Go/Rust)        (future)         (API)      │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                       grove engine                              │
+│                                                                 │
+│   ┌─────────────┐  ┌──────────────┐  ┌───────────────────────┐ │
+│   │  session    │  │  worktree    │  │  event stream         │ │
+│   │  manager    │  │  manager     │  │                       │ │
+│   │             │  │              │  │  agent.started         │ │
+│   │  create     │  │  create      │  │  agent.output          │ │
+│   │  attach     │  │  setup       │  │  agent.idle            │ │
+│   │  detach     │  │  teardown    │  │  agent.stopped         │ │
+│   │  send keys  │  │  diff        │  │  agent.waiting_input   │ │
+│   │  capture    │  │              │  │                       │ │
+│   │  status     │  │              │  │  (any client can       │ │
+│   │             │  │              │  │   subscribe)           │ │
+│   └──────┬──────┘  └──────────────┘  └───────────────────────┘ │
+│          │                                                      │
+│   ┌──────▼──────────────────────────────────────┐              │
+│   │  session backend (pluggable)                │              │
+│   │                                              │              │
+│   │  ┌─────────┐  ┌─────────┐  ┌─────────────┐ │              │
+│   │  │  dtach   │  │  tmux   │  │  direct pty │ │              │
+│   │  └─────────┘  └─────────┘  └─────────────┘ │              │
+│   └─────────────────────────────────────────────┘              │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  │
+│   │  agent 1  │  │  agent 2  │  │  agent 3  │  │  agent N  │  │
+│   │  claude   │  │  claude   │  │  aider    │  │  codex    │  │
+│   │           │  │           │  │           │  │           │  │
+│   │  feat/auth│  │  feat/pay │  │  fix/bug  │  │  refactor │  │
+│   └───────────┘  └───────────┘  └───────────┘  └───────────┘  │
+│        git worktrees (.worktrees/)                              │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Hybrid option: support both
+The engine is a **daemon** that:
+1. Manages agent sessions (create, monitor, attach, kill)
+2. Manages worktrees (create, setup via Grovefile, teardown)
+3. Emits an event stream that any client can subscribe to
+4. Exposes a Unix socket API
 
-Start with tmux (grove already uses it). Add dtach as an alternative backend
-behind a config flag. Let the TUI abstract over both:
+Clients are thin. They consume the API and render it however they want.
+
+---
+
+## The engine
+
+### What it manages
+
+Each agent in the grove is a **session**:
+
+```
+session {
+    id:        "feat-auth"
+    branch:    "feat/auth"
+    worktree:  ".worktrees/feat-auth"
+    agent:     "claude --dangerously-skip-permissions"
+    status:    active | thinking | idle | waiting_input | stopped
+    started:   1708956000
+    last_output: 1708956300
+    socket:    "/tmp/grove/myproject/feat-auth.sock"
+}
+```
+
+### Session lifecycle
+
+```
+grove open feat/auth
+  │
+  ├── create worktree (if needed)
+  ├── run grove_setup() (if defined)
+  ├── start session backend (dtach/tmux)
+  ├── launch agent command in session
+  ├── register in session registry
+  └── start monitoring output
+        │
+        ├── bytes flowing → status: active
+        ├── no bytes, process alive → status: thinking
+        ├── no bytes for 60s+ → status: idle
+        ├── prompt pattern detected → status: waiting_input
+        └── process exited → status: stopped
+```
+
+### Status detection
+
+Status comes from watching the byte stream. No agent-specific APIs needed.
+
+```
+active          bytes received in last 5s
+thinking        process alive, no bytes in 5-60s
+idle            no bytes for 60s+
+waiting_input   output matches known prompt patterns:
+                  - "Allow" / "Deny" (claude)
+                  - "(Y)es / (N)o" (aider)
+                  - "?" at end of line
+                  - configurable in Grovefile
+stopped         process exited
+```
+
+The `waiting_input` status is the key one for human-in-the-loop. The engine
+detects when an agent is asking for permission and surfaces it. A client can
+then show a notification, and the human can jump in or auto-approve.
+
+### API (Unix socket, JSON)
+
+```
+grove.sessions.list        → [session, session, ...]
+grove.sessions.get <id>    → session
+grove.sessions.create      → { branch, agent?, attach? }
+grove.sessions.kill <id>   → ok
+grove.sessions.attach <id> → hands off PTY to client
+grove.sessions.send <id>   → send bytes to session stdin
+grove.sessions.capture <id> → last N lines of output
+grove.sessions.diff <id>   → git diff vs base branch
+
+grove.events.subscribe     → event stream (SSE / newline-delimited JSON)
+```
+
+This is the interface contract. Any client that speaks JSON over a Unix socket
+can drive Grove. The CLI, the TUI, a web UI, a Slack bot, a CI system — all
+equal citizens.
+
+### Session backends
+
+The engine abstracts over how sessions are actually run:
+
+**dtach** (recommended)
+- Lightest weight. Raw PTY forwarding over Unix socket.
+- Engine taps the socket for output monitoring + VT parsing.
+- Attach = connect client terminal to dtach socket.
+- Send keys = write bytes to socket.
+- Capture = engine maintains a ring buffer of recent output per session.
+
+**tmux** (fallback / compatibility)
+- Heavier but battle-tested. Everybody has it.
+- Capture = `tmux capture-pane`.
+- Send keys = `tmux send-keys`.
+- Attach = `tmux attach-session`.
+
+**direct PTY** (simplest)
+- Engine owns the PTY directly. No external tool.
+- Maximum control, but must implement detach/reattach.
+- Most work to build, cleanest result.
+
+The engine starts with one backend. Abstracts it behind an interface so the
+others can be added later.
+
+---
+
+## The clients
+
+### CLI (`grove` — bash, already exists)
+
+The current bash script. Stays as-is for basic operations:
 
 ```bash
-# Grovefile
-GROVE_SESSION_BACKEND="dtach"  # or "tmux" (default)
+grove feat/auth          # create agent session
+grove ls                 # list sessions
+grove attach feat/auth   # attach to session
+grove rm feat/auth       # kill + cleanup
 ```
 
-The TUI talks to whichever backend is configured. This lets people who already
-have tmux workflows keep them, while making dtach available for people who want
-lighter sessions or better terminal fidelity.
+For simple workflows this is all you need. No daemon, no engine — just the
+bash script calling tmux/dtach directly. The engine is optional.
 
----
+When the engine IS running, the CLI talks to it instead of managing
+tmux/dtach directly. Same commands, richer output (status indicators, event
+awareness).
 
-## TUI interface design
+### TUI (`grove ui`)
 
-### Main screen: session list
+A terminal dashboard. Shows the grove at a glance.
 
 ```
- grove — myproject                                           3 agents running
+ grove — myproject                                 4 sessions  2 waiting
 
  ┌─ Sessions ──────────────────────┬─ Preview ──────────────────────────────┐
  │                                 │                                        │
- │  ● feat/auth          3m ago   │  $ claude                              │
- │    feat/payments      idle     │                                        │
- │    fix/login-bug      12m ago  │  I'll implement the JWT refresh token  │
- │                                 │  logic. Let me start by reading the    │
- │                                 │  existing auth middleware...           │
- │                                 │                                        │
+ │  ● feat/auth          3m ago   │  I'll implement the JWT refresh token  │
+ │  ⚠ feat/payments      waiting  │  logic. Let me start by reading the    │
+ │  ◐ fix/login-bug      thinking │  existing auth middleware...           │
+ │  ○ refactor/db        idle     │                                        │
  │                                 │  Read src/middleware/auth.ts           │
  │                                 │                                        │
  │                                 │  Now I'll update the token refresh     │
  │                                 │  endpoint:                             │
  │                                 │                                        │
  │                                 │  Edit src/routes/auth.ts               │
- │                                 │  ████████████░░░░░░░░ writing...       │
- │                                 │                                        │
- │                                 │                                        │
  │                                 │                                        │
  ├─────────────────────────────────┴────────────────────────────────────────┤
- │ [n]ew  [a]ttach  [k]ill  [d]iff  [enter] fullscreen  [q]uit            │
+ │ [enter] attach  [n]ew  [d]iff  [y] approve  [K]ill  [q]uit             │
  └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key interactions
+The TUI is a client. It subscribes to the engine's event stream, renders
+sessions, and sends commands back. It doesn't manage anything itself.
 
-| Key       | Action                                                    |
-|-----------|-----------------------------------------------------------|
-| `j/k`     | Navigate session list                                     |
-| `Enter`   | Attach to session (fullscreen, detach with `ctrl-\`)      |
-| `n`       | New session — prompts for branch name, runs `grove open`  |
-| `k`       | Kill session + worktree (`grove rm`)                      |
-| `d`       | Show `git diff` for this worktree vs main                 |
-| `p`       | Toggle preview pane (or cycle: off / small / large)       |
-| `s`       | Send a message/prompt to the agent                        |
-| `y`       | Send `y\n` to accept a pending prompt                     |
-| `q`       | Quit TUI (sessions keep running)                          |
-| `?`       | Help                                                      |
+Key features:
+- **Preview pane** — last N lines from the selected session's output
+- **Status indicators** — derived from engine events, not polled
+- **`y` to approve** — when an agent is `waiting_input`, one keystroke approves
+- **`enter` to attach** — drops into the agent's terminal fullscreen
+- **`d` for diff** — shows what the agent has changed vs base branch
 
-### Status indicators
+### Web UI (future)
 
-```
-● active    — agent is producing output (bytes flowing in last 5s)
-◐ thinking  — agent is running but no output (waiting for API response)
-○ idle      — no output for 60s+ (might be done or stuck)
-■ stopped   — session exited
-```
+Same engine API, different renderer. The event stream maps naturally to
+WebSocket or SSE. A web dashboard could show:
 
-Status is derived from monitoring the dtach socket / tmux pane for byte flow.
-No need for agent-specific APIs — just watch the terminal output.
+- All sessions with live status
+- Preview/output streaming
+- Diff viewer (rendered HTML, not terminal)
+- Approve/reject from a browser (phone, iPad, etc.)
 
-### Preview pane
-
-The preview shows the last N lines of the agent's terminal output. With tmux,
-this uses `capture-pane`. With dtach, the TUI maintains a VT parser per session
-that taps the socket and keeps a virtual screen buffer.
-
-The preview is read-only. To interact, press Enter to attach fullscreen.
-
-### New session flow
-
-```
- ┌─ New Session ────────────────────────────────────────────┐
- │                                                          │
- │  Branch: feat/█                                          │
- │                                                          │
- │  Recent branches:                                        │
- │    feat/auth                                             │
- │    feat/payments                                         │
- │    fix/login-bug                                         │
- │                                                          │
- │  [enter] create  [tab] autocomplete  [esc] cancel        │
- └──────────────────────────────────────────────────────────┘
-```
-
-Tab-completes from local + remote branches. Creating a new branch forks from
-current HEAD (same as `grove <branch>` today).
-
-### Diff view
-
-```
- grove — myproject > feat/auth (diff vs main)
-
- ┌──────────────────────────────────────────────────────────────────────────┐
- │  src/middleware/auth.ts                              +24 -3             │
- │  src/routes/auth.ts                                 +87 -12            │
- │  src/models/token.ts                                +45 (new)          │
- │  tests/auth.test.ts                                 +62 (new)          │
- ├──────────────────────────────────────────────────────────────────────────┤
- │  src/middleware/auth.ts                                                  │
- │                                                                          │
- │  @@ -15,7 +15,20 @@                                                     │
- │   import { verifyToken } from '../lib/jwt';                              │
- │                                                                          │
- │  -export function authMiddleware(req, res, next) {                       │
- │  +export function authMiddleware(options = {}) {                         │
- │  +  const { refreshOnExpiry = true } = options;                          │
- │  +  return (req, res, next) => {                                         │
- │  +    const token = req.headers.authorization?.split(' ')[1];            │
- │                                                                          │
- ├──────────────────────────────────────────────────────────────────────────┤
- │ [j/k] files  [enter] expand  [q] back                                   │
- └──────────────────────────────────────────────────────────────────────────┘
-```
-
-This is the killer feature most tools lack. When you have 5 agents running, the
-question isn't "what are they doing right now" — it's "what have they done."
-The diff view answers that instantly.
+Not a priority. But the engine makes it possible without any backend work.
 
 ---
 
-## Language / framework options
+## What makes this different
 
-| Option        | Pros                                     | Cons                              |
-|---------------|------------------------------------------|-----------------------------------|
-| **Go + bubbletea** | Fast, single binary, great TUI ecosystem (Claude Squad uses this) | Another language in the project |
-| **Rust + ratatui** | Fast, single binary, great TUI ecosystem (Orchestra uses this) | Slower to iterate, steep learning curve |
-| **Bash + dialog/whiptail** | Stays in bash, zero new deps | Extremely limited, bad UX |
-| **Python + textual** | Quick to prototype, rich widgets | Runtime dep, slower |
-| **Zig** | Small binary, no runtime, C interop for vterm | Immature ecosystem |
+### 1. Engine-first, UI-second
 
-**Recommendation: Go + bubbletea.** It's the proven choice in this exact
-space (Claude Squad shipped with it). Single binary, cross-platform, fast
-iteration. The TUI is a separate binary from `grove` (bash), so there's no
-language conflict.
+Everyone else builds a TUI that IS the tool. Claude Squad is a Go TUI.
+Orchestra is a Rust TUI. You close the TUI, you lose your management layer.
 
-Alternative worth considering: **Rust + ratatui** if you want the smallest
-possible binary and care about the VT parser performance (parsing 10+ agent
-output streams simultaneously).
+Grove's engine runs independently. The TUI is optional. The web UI is optional.
+The CLI works without either. You can manage your grove from a phone browser,
+a tmux split, or a cron job. Same API, same events.
 
----
+### 2. Grovefile
 
-## What makes Grove different?
-
-Looking at the landscape, every tool is building roughly the same thing. The
-differentiators that could matter:
-
-### 1. The Grovefile convention
-
-Nobody else has a declarative per-repo config that defines the environment.
-Claude Squad makes you configure everything through the TUI. Multiclaude uses a
-config file but it's tool-specific. The Grovefile is project-level and
-agent-agnostic:
+Per-repo, declarative, travels with the code:
 
 ```bash
 GROVE_PROJECT="myapp"
-grove_setup()   { npm install; }
+
+grove_setup() {
+    npm install
+}
+
 grove_windows() {
     grove_window "server" "npm run dev"
     grove_window "agent" "claude --dangerously-skip-permissions"
 }
+
+# NEW: prompt patterns for waiting_input detection
+grove_prompts() {
+    grove_prompt "Allow"          # claude permission prompt
+    grove_prompt "(Y)es"          # aider confirmation
+    grove_prompt "Continue?"      # generic
+}
 ```
 
-This means: clone a repo with a Grovefile, run `grove feat/whatever`, and
-you have a fully configured environment. No manual setup. The Grovefile
-travels with the repo.
+Clone a repo with a Grovefile. Run `grove feat/whatever`. Done. The
+environment configures itself.
 
-### 2. Plumbing/porcelain split
+### 3. Human-in-the-loop as a first-class feature
 
-`grove` (bash) = plumbing. Always works, no dependencies beyond bash+git+tmux.
-`grove-tui` = porcelain. Optional, nice-to-have.
+The `waiting_input` status detection + event stream means you know the moment
+any agent needs you. You get a notification (terminal bell, desktop
+notification, webhook — whatever the client supports). You jump in, approve or
+redirect, jump out. The rest of the grove keeps running.
 
-This means grove is composable. You can script it, pipe it, use it in CI, call
-it from other tools. The TUI doesn't eat the CLI.
+This is the actual workflow: not staring at agents, not fully autonomous.
+Tending your grove. Checking in when needed.
 
-### 3. dtach backend (if pursued)
+### 4. Actually open source, actually an idea
 
-Nobody in the space uses dtach. Everyone copies the tmux approach. A dtach
-backend with in-process VT parsing would be genuinely novel and deliver better
-terminal fidelity + lower overhead.
+Not a Cursor marketing video. Not a demo that falls apart. A real tool that
+solves a real problem: managing parallel coding agents with human oversight.
 
-### 4. Staying small
+The core engine is < 1000 lines. The CLI is 720 lines of bash. The whole thing
+should be understandable by reading the source.
 
-Claude Squad is already 5k+ lines of Go. Multiclaude has daemons and polling
-loops. Grove could win by staying radically simple — do session management
-extremely well and nothing else.
+---
 
-Don't build: coordination protocols, message passing between agents, CI
-integration, merge automation. Those are separate concerns. Grove manages
-environments. Other tools can handle orchestration strategy.
+## Implementation plan
+
+### Phase 1: engine core
+
+The engine as a standalone daemon, with the CLI as the first client.
+
+1. **Session registry** — in-memory, backed by a JSON file in `.grove/`
+2. **Session backend: tmux** — start with what grove already uses
+3. **Output monitoring** — tail tmux panes, detect status from byte flow
+4. **Unix socket API** — JSON protocol, the interface contract
+5. **CLI integration** — `grove` talks to the engine when it's running,
+   falls back to direct tmux when it's not
+
+Ship this. It's useful standalone — `grove ls` shows richer status, the CLI
+gains `grove status` and `grove approve` commands.
+
+### Phase 2: TUI
+
+A terminal client that subscribes to the engine.
+
+1. **Session list** with live status from event stream
+2. **Preview pane** using `grove.sessions.capture`
+3. **Attach/detach** flow
+4. **Diff view** using `grove.sessions.diff`
+5. **Approve shortcut** — `y` sends approval to `waiting_input` sessions
+
+### Phase 3: dtach backend
+
+Replace tmux with dtach for lighter sessions.
+
+1. **dtach session management** — create/attach/detach
+2. **VT parser** — maintain screen buffer per session for capture
+3. **Output monitoring** — tap dtach sockets for status detection
+4. **Backend config** — `GROVE_SESSION_BACKEND` in Grovefile
+
+### Phase 4: web UI
+
+A browser client consuming the same engine API.
+
+1. **WebSocket bridge** — proxy engine events to the browser
+2. **Dashboard** — session list, status, preview
+3. **Diff viewer** — rendered HTML diffs
+4. **Approve from anywhere** — phone, iPad, remote
+
+---
+
+## Language choice
+
+The engine needs to:
+- Run as a daemon
+- Manage PTYs / subprocesses
+- Serve a Unix socket API
+- Parse terminal output (VT sequences)
+- Be distributable as a single binary
+
+| Option             | Verdict                                               |
+|--------------------|-------------------------------------------------------|
+| **Go**             | Best ecosystem for this exact problem. bubbletea for  |
+|                    | TUI, goroutines for concurrent session monitoring,    |
+|                    | single binary. Claude Squad proves the stack works.   |
+| **Rust**           | Better perf, harder to iterate. Worth it if VT        |
+|                    | parsing performance matters (10+ concurrent streams). |
+| **Bash (engine)**  | No. Can't do daemon, socket API, or VT parsing.       |
+| **Bash (CLI)**     | Yes. Keep the existing CLI as the lightweight client.  |
+
+**Recommendation: Go for engine + TUI. Bash stays for the CLI.**
+
+The existing `grove` bash script remains as the zero-dependency entry point.
+When the engine is running, it becomes a thin client. When it's not, it works
+exactly as it does today.
 
 ---
 
 ## Open questions
 
-1. **dtach availability** — dtach isn't installed by default anywhere. Is it
-   worth requiring an extra dependency? Or should grove vendor/bundle it? (It's
-   tiny — ~500 lines of C.)
+1. **Daemon lifecycle** — who starts the engine? `grove up`? Auto-start on
+   first `grove open`? Systemd/launchd service? Should it even be a long-running
+   daemon, or a short-lived process that starts on demand?
 
-2. **VT parser complexity** — maintaining a virtual terminal buffer per session
-   is non-trivial. Is the preview pane valuable enough to justify this? Or is
-   "attach to see, detach to go back" good enough?
+2. **Multi-repo** — should one engine manage multiple repos? Or one engine
+   per repo? Per-repo is simpler and matches the Grovefile convention.
 
-3. **Agent awareness** — should the TUI understand agent-specific output
-   (Claude's tool use markers, Aider's edit blocks) and display structured
-   status? Or stay terminal-agnostic and just show raw output?
+3. **Agent lifecycle** — should grove restart crashed agents? Auto-retry?
+   Or just report the status and let the human decide? (Leaning toward the
+   latter — opinionated minimalism.)
 
-4. **Scope creep** — the temptation is to build coordination features (agent
-   messaging, task assignment, merge automation). Should Grove stay in the
-   session management lane? Or is the orchestration layer where the real value
-   is?
+4. **Auth for web UI** — if the web UI exists, how do you secure it?
+   Local-only? Token-based? This is a future problem but worth noting.
 
-5. **Single binary distribution** — if the TUI is Go/Rust, should `grove`
-   (bash) be bundled inside it? Or keep them separate? Separate is cleaner
-   but harder to install.
+5. **Config location** — engine state lives where? `.grove/` in the repo root
+   (next to `.worktrees/`)? XDG dirs? Repo-local is simpler and more portable.
 
----
-
-## Minimum viable TUI
-
-If we build the smallest possible thing that's useful:
-
-1. **Session list** with status indicators (active/idle/stopped)
-2. **Attach/detach** (Enter to go in, ctrl-\ to come back)
-3. **New session** (type branch name, grove handles the rest)
-4. **Kill session** (grove rm)
-5. **Preview pane** showing last N lines of selected session
-
-That's it. No diff view, no agent awareness, no dtach backend. Just a
-navigable list of grove sessions with quick attach. Build on tmux since grove
-already uses it. Add dtach and fancy features later.
-
-Ship it as `grove ui`.
+6. **Name** — is the engine also called `grove`? Or `groved` (grove daemon)?
+   `grove-engine`? Single binary with subcommands (`grove engine start`)?
