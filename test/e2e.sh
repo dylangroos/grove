@@ -754,6 +754,76 @@ test_checkout_continue_after_done() {
     cleanup
 }
 
+test_kill_missing_args() {
+    echo -e "${BOLD}32. kill missing args${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove kill 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "Missing branch name" "error message"
+
+    cleanup
+}
+
+test_kill_no_worktree() {
+    echo -e "${BOLD}33. kill no worktree${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove kill nonexistent 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "No worktree" "error message"
+
+    cleanup
+}
+
+test_kill_no_running_agent() {
+    echo -e "${BOLD}34. kill no running agent${NC}"
+    setup_test_repo
+
+    # Create worktree without an agent
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+
+    local output rc=0
+    output=$(./grove kill feat/auth 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code (graceful)"
+    assert_contains "$output" "No running agent" "no agent message"
+
+    cleanup
+}
+
+test_kill_keeps_worktree() {
+    echo -e "${BOLD}35. kill keeps worktree${NC}"
+    setup_test_repo
+
+    # Create worktree without an agent (can't use dtach in test env)
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+
+    # Even with no agent, kill should succeed gracefully and worktree should remain
+    ./grove kill feat/auth >/dev/null 2>&1 || true
+
+    [[ -d "$TEST_DIR/.worktrees/feat-auth" ]] \
+        && pass "worktree still exists after kill" \
+        || fail "worktree still exists after kill"
+
+    cleanup
+}
+
+test_help_shows_kill() {
+    echo -e "${BOLD}36. help shows kill${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove help 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "kill" "help mentions kill"
+
+    cleanup
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 main() {
@@ -805,6 +875,11 @@ main() {
     test_checkout_auto_attach
     test_status_shows_waiting
     test_checkout_continue_after_done
+    test_kill_missing_args
+    test_kill_no_worktree
+    test_kill_no_running_agent
+    test_kill_keeps_worktree
+    test_help_shows_kill
 
     # Restore ~/.grove
     if [[ -n "$SAVED_GROVE_CONFIG" ]]; then
