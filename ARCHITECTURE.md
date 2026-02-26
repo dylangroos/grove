@@ -1,187 +1,119 @@
-# Grove — Architecture
+# Grove — What's next
 
-Simple plan. Build incrementally. Each phase ships something useful.
+What already works (v0.3.0): worktrees, dtach sessions, agent auto-detect,
+status, diff, log, output, attach, Grovefile. The plumbing is solid.
 
----
-
-## What exists today (v0.2.0)
-
-A 720-line bash script that manages git worktrees + tmux sessions.
-
-```
-grove <branch>          →  worktree + tmux session
-grove attach <branch>   →  attach to session
-grove ls                →  list worktrees + session status
-grove rm <branch>       →  kill session + remove worktree
-grove init              →  generate Grovefile
-```
-
-Worktrees live in `.worktrees/`. Sessions named `grove-{project}-{slug}`.
-Grovefile defines `grove_setup()` and `grove_windows()`. It works.
+What's missing: **the human-in-the-loop layer.** You can spawn agents and
+attach to them. You can't meaningfully oversee them without attaching.
 
 ---
 
-## Target architecture
+## The gap
+
+Right now, managing 5 agents looks like this:
 
 ```
-                ┌──────────────────────────────────┐
-                │           grove CLI              │
-                │         (bash script)            │
-                │                                  │
-                │  grove checkout feat/auth        │
-                │  grove branch                    │
-                │  grove status                    │
-                │  grove diff feat/auth            │
-                │  grove log feat/auth             │
-                │  grove attach feat/auth          │
-                │  grove approve feat/auth         │
-                └────────────┬─────────────────────┘
-                             │
-                     reads / writes
-                             │
-                             ▼
-                ┌──────────────────────────────────┐
-                │         .grove/ state            │
-                │                                  │
-                │  sessions.json   ← registry      │
-                │  log/            ← output logs   │
-                │    feat-auth.log                 │
-                │    fix-bug.log                   │
-                └──────────────────────────────────┘
-                             │
-                      manages / monitors
-                             │
-                ┌────────────┴─────────────────────┐
-                │                                  │
-         ┌──────▼──────┐                    ┌──────▼──────┐
-         │    tmux     │                    │    tmux     │
-         │   session   │         ...        │   session   │
-         │  feat-auth  │                    │  fix-bug    │
-         └──────┬──────┘                    └──────┬──────┘
-                │                                  │
-         ┌──────▼──────┐                    ┌──────▼──────┐
-         │  .worktrees │                    │  .worktrees │
-         │  /feat-auth │                    │  /fix-bug   │
-         └─────────────┘                    └─────────────┘
+gr status                    # see they're running... cool
+gr attach feat/auth          # attach, see what's happening, detach
+gr attach feat/payments      # attach, see what's happening, detach
+gr attach fix/bug            # attach, oh it's waiting for approval
+                             # type y, detach
+gr attach refactor/db        # attach, it's idle... is it done? stuck?
+                             # detach
 ```
 
-No daemon. No socket API. No separate binary. Just the bash script,
-a state directory, and tmux. The engine is the script + the state files.
+That's the tmux/dtach tax. You have to enter each session to know what's
+going on. The status command tells you running/waiting/done, but not:
 
-A daemon / TUI / web UI can come later by reading the same state files
-and talking to the same tmux sessions. But v1 is just the CLI.
+- **What** it's waiting for (permission prompt? stuck? confused?)
+- **What** it's actually done (diff stats, files changed)
+- **How** to approve without attaching (send input from outside)
 
 ---
 
-## State: `.grove/`
+## What we're adding
 
-Lives at repo root next to `.worktrees/`.
+### 1. `grove send` — the human-in-the-loop primitive
 
-### `sessions.json`
+Write bytes directly to a dtach socket without attaching.
 
-```json
-{
-  "feat-auth": {
-    "branch": "feat/auth",
-    "worktree": ".worktrees/feat-auth",
-    "tmux_session": "grove-myapp-feat-auth",
-    "agent": "claude --dangerously-skip-permissions",
-    "status": "active",
-    "started": 1708956000,
-    "last_output": 1708956300,
-    "pid": 12345
-  },
-  "fix-bug": {
-    "branch": "fix/bug",
-    "worktree": ".worktrees/fix-bug",
-    "tmux_session": "grove-myapp-fix-bug",
-    "agent": "claude --dangerously-skip-permissions",
-    "status": "idle",
-    "started": 1708955000,
-    "last_output": 1708955060,
-    "pid": 12346
-  }
+```bash
+grove send feat/auth "y"              # approve a prompt
+grove send feat/auth "/help"          # send a command
+grove send fix/bug "try a different approach, the tests are in test/"
+```
+
+Implementation: open the dtach socket and write bytes + newline.
+
+```bash
+cmd_send() {
+    local branch="$1" text="$2"
+    local slug wt_dir socket
+    slug="$(slugify_branch "$branch")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+    socket="$(grove_socket_path "$wt_dir")"
+
+    # dtach sockets are Unix domain sockets — write raw bytes
+    # Use dtach's -p flag to push characters to the session
+    printf '%s\n' "$text" | dtach -p "$socket"
 }
 ```
 
-Written by the CLI on every state change. Read by the CLI (and future
-TUI/web) to display status.
+This is the single most important missing feature. Everything else builds
+on it.
 
-### `log/<slug>.log`
-
-Raw output captured from each session. Append-only. Used by `grove log`.
-
-Captured via `tmux pipe-pane` — tmux writes all pane output to a file.
-Zero overhead, built into tmux, no polling.
+### 2. `grove approve` — one-command approval
 
 ```bash
-# When creating a session:
-tmux pipe-pane -t "$session:agent" -o "cat >> .grove/log/${slug}.log"
+grove approve feat/auth          # send "y" + enter
+grove approve --all              # approve all waiting agents
 ```
 
----
+Sugar for `grove send <branch> "y"`. The `--all` flag approves every
+session with `waiting` status. That's your "check the grove, approve
+the batch" workflow.
 
-## Commands
+### 3. Smarter status — prompt detection, not just timers
 
-### Phase 1: rename existing commands to git-style
+Current status detection:
 
-| new command                   | maps to current           | change needed       |
-|-------------------------------|---------------------------|---------------------|
-| `grove checkout <branch>`    | `grove <branch>`          | rename              |
-| `grove checkout -b <branch>` | `grove <branch>` (new)    | add -b flag         |
-| `grove branch`               | `grove ls`                | rename              |
-| `grove attach <branch>`      | `grove attach <branch>`   | no change           |
-| `grove rm <branch>`          | `grove rm <branch>`       | no change           |
-| `grove init`                 | `grove init`              | no change           |
+```
+running     = output in last 10s
+waiting     = no output for 10s+
+done        = dtach socket gone
+```
 
-Keep `grove <branch>` as a shorthand alias for `grove checkout <branch>`.
-Keep `grove ls` as an alias for `grove branch`. No breaking changes.
+This is lossy. An agent thinking for 15s shows as "waiting" when it's
+actually working. An agent stuck on a prompt for 5s shows as "running."
 
-### Phase 2: new commands (need `.grove/` state)
-
-| command                       | what it does                                      |
-|-------------------------------|---------------------------------------------------|
-| `grove status`                | list sessions with status (active/idle/waiting)   |
-| `grove diff <branch>`        | `git diff main...<branch>` in the worktree        |
-| `grove log <branch>`         | tail `.grove/log/<slug>.log`                      |
-| `grove send <branch> <text>` | `tmux send-keys` to the agent pane                |
-| `grove approve <branch>`     | `grove send <branch> y Enter`                     |
-| `grove kill <branch>`        | kill tmux session, keep worktree for review        |
-
-### Phase 3: status detection
-
-Status is derived from the log file. No daemon needed — just check the
-file on each `grove status` call:
+Better: scan the log tail for known prompt patterns.
 
 ```bash
-grove_detect_status() {
-    local log=".grove/log/${slug}.log"
-    local tmux_session="$1"
-
-    # Is the tmux session alive?
-    if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
-        echo "stopped"
-        return
+get_agent_status() {
+    local wt_dir="$1"
+    if ! is_agent_running "$wt_dir"; then
+        echo "done"; return
     fi
 
-    # When was the last output?
-    local last_mod
-    last_mod=$(stat -c %Y "$log" 2>/dev/null || echo 0)
-    local now
-    now=$(date +%s)
-    local age=$(( now - last_mod ))
+    local log_file
+    log_file="$(grove_log_path "$wt_dir")"
 
-    # Check last line for prompt patterns
-    local last_line
-    last_line=$(tail -1 "$log" 2>/dev/null)
-    if echo "$last_line" | grep -qE '(Allow|Deny|Y/n|\? )'; then
+    # Check last few lines for prompt patterns
+    local tail
+    tail="$(tail -5 "$log_file" 2>/dev/null | strip_ansi)"
+
+    # Known prompt patterns
+    if echo "$tail" | grep -qiE '(Allow|Deny|yes.*no|y/n|approve|reject|Continue\?)'; then
         echo "waiting"
         return
     fi
 
-    if [ "$age" -lt 5 ]; then
-        echo "active"
-    elif [ "$age" -lt 60 ]; then
+    # Fall back to time-based
+    local age
+    age=$(( $(date +%s) - $(file_mtime "$log_file") ))
+    if [[ "$age" -le 10 ]]; then
+        echo "running"
+    elif [[ "$age" -le 120 ]]; then
         echo "thinking"
     else
         echo "idle"
@@ -189,131 +121,145 @@ grove_detect_status() {
 }
 ```
 
-That's it. Status detection in ~20 lines of bash. No daemon, no VT
-parser, no event stream. Just file timestamps and pattern matching.
-
----
-
-## Status display
-
-### `grove branch`
+New states:
 
 ```
-  feat/auth          3 min ago
-  fix/login-bug      12 min ago
-  refactor/db        idle
+● running    bytes in last 10s, no prompt detected
+◐ thinking   no output 10-120s, process alive (API call, long operation)
+⚠ waiting    prompt pattern detected in output tail
+○ idle       no output 120s+, process alive (stuck? done thinking?)
+■ done       process exited
 ```
 
-### `grove status`
+The `thinking` state is the key addition. It means "the agent is alive
+and working, just not producing output yet." This is normal for LLM
+agents — they spend a lot of time waiting for API responses.
+
+### 4. Diff stats in status
+
+The `get_diff_stat()` function exists but isn't shown in `grove status`.
+Add it:
 
 ```
-  ● feat/auth        active     +87 -12   3 files   3m ago
-  ⚠ feat/payments    waiting    +245 -31  8 files   1m ago
-  ◐ fix/login-bug    thinking   +12 -4    1 file    12m ago
-  ○ refactor/db      idle       +156 -89  6 files   45m ago
+BRANCH                   AGENT      STATUS    CHANGES           ACTIVITY
+feat/auth                claude     running   +87 -12 (3)       editing src/auth.ts
+feat/payments            claude     waiting   +245 -31 (8)      Allow edit? [Y/n]
+fix/login-bug            claude     thinking                    reading test files...
+refactor/db              claude     done      +156 -89 (6)      12m ago · "refactor db"
 ```
 
-The diff stats come from:
-```bash
-git diff --stat main...$(git -C ".worktrees/${slug}" rev-parse HEAD)
-```
+Now `grove status` (or just `gr`) is a real dashboard. You see at a
+glance: what's running, what's waiting, what's done, and how much each
+agent has produced.
 
-### `grove log feat/auth`
-
-```
-  I'll implement the JWT refresh token logic. Let me start by
-  reading the existing auth middleware...
-
-  Read src/middleware/auth.ts
-
-  Now I'll update the token refresh endpoint:
-
-  Edit src/routes/auth.ts
-```
-
-Just `tail -n 50 .grove/log/feat-auth.log` with some cleanup.
-
----
-
-## Agent adapters (future, not phase 1)
-
-For now, all agents are treated the same: a command that runs in tmux.
-Status comes from byte flow + pattern matching on the log.
-
-Later, agent-specific adapters can parse the log for richer info:
+### 5. `grove kill` — stop agent, keep worktree
 
 ```bash
-# In Grovefile
-GROVE_AGENT_ADAPTER="claude"   # or "codex", "aider", "generic"
+grove kill feat/auth          # stop agent, keep worktree for review
+grove rm feat/auth            # stop agent AND remove worktree + branch
 ```
 
-The adapter would define:
-- Custom prompt patterns for `waiting_input` detection
-- Output parsing for structured activity (which file is being edited)
-- Token usage extraction
+Currently `rm` does both. But sometimes you want to stop a runaway agent
+and review its work before deciding to keep or discard. `kill` gives you
+that.
 
-But this is not needed for v1. The generic approach works for everything.
+### 6. Notifications
+
+When an agent hits `waiting` status, optionally notify:
+
+```bash
+# Terminal bell (works in most terminals)
+printf '\a'
+
+# macOS notification
+osascript -e 'display notification "feat/auth needs approval" with title "grove"'
+
+# Generic: configurable hook
+if declare -f grove_notify >/dev/null 2>&1; then
+    grove_notify "$branch" "$status"
+fi
+```
+
+Configurable in Grovefile:
+
+```bash
+grove_notify() {
+    local branch="$1" status="$2"
+    # your notification logic
+}
+```
+
+Or just the terminal bell by default. The bell rings, you glance at
+`grove status`, approve what needs approving, move on.
 
 ---
 
-## Implementation phases
+## Implementation order
 
-### Phase 1: git-style commands + state dir
+Each step ships independently. Each makes grove more useful.
 
-**Changes to `grove` bash script:**
+### Step 1: `send` + `approve`
+- `cmd_send()` — write to dtach socket
+- `cmd_approve()` — sugar for send "y"
+- `grove approve --all`
+- Wire into main dispatch
 
-1. Add `checkout` subcommand (calls existing worktree+session creation)
-2. Add `branch` subcommand (calls existing `ls` logic)
-3. Keep old names as aliases (`grove <branch>` still works)
-4. Create `.grove/` and `.grove/log/` on first use
-5. Write `sessions.json` on session create/destroy
-6. Enable `tmux pipe-pane` to capture output to `.grove/log/`
+**~30 lines of bash.** Biggest bang for least effort.
 
-**Result:** Same tool, new names, session state is now tracked on disk.
+### Step 2: smarter status
+- Prompt pattern detection in `get_agent_status()`
+- Add `thinking` state (10-120s no output)
+- Diff stats in `cmd_status()` output
+- Better formatting: status indicators (● ◐ ⚠ ○ ■), aligned columns
 
-### Phase 2: new read commands
+**~50 lines changed.** Makes `grove status` a real dashboard.
 
-1. `grove status` — reads `sessions.json` + log files, shows status table
-2. `grove diff <branch>` — runs git diff against main for that worktree
-3. `grove log <branch>` — tails the log file for that session
+### Step 3: `kill` command
+- `cmd_kill()` — calls `kill_agent()` without removing worktree
+- Update help text
 
-**Result:** You can now see what all your agents are doing and have done
-without attaching to each one.
+**~15 lines.**
 
-### Phase 3: new write commands
+### Step 4: notifications
+- Terminal bell on status change to `waiting`
+- `grove_notify()` hook in Grovefile
+- macOS native notification if available
 
-1. `grove send <branch> <text>` — `tmux send-keys` to agent pane
-2. `grove approve <branch>` — sugar for `grove send <branch> y Enter`
-3. `grove kill <branch>` — kill session, keep worktree
+**~20 lines.**
 
-**Result:** Human-in-the-loop from the CLI. Approve prompts without
-attaching.
+### Step 5 (future): TUI
+- Separate binary (Go + bubbletea)
+- Reads same state: worktree dirs, dtach sockets, log files
+- Calls `grove` commands or dtach directly
+- Live-updating dashboard with preview pane
+- Inline diff view
+- The lazy-grove triage workflow
 
-### Phase 4: TUI (separate binary, consumes same state)
-
-A Go/Rust binary that:
-1. Reads `.grove/sessions.json` for session list
-2. Tails `.grove/log/*.log` for preview + status
-3. Calls `grove` commands (or tmux directly) for actions
-4. Renders the triage view
-
-The TUI is a **consumer** of the state that the CLI produces. No new
-backend needed.
+This is the only step that requires a new binary. Everything before it
+is pure bash additions to the existing script.
 
 ---
 
-## File changes summary
+## What this gets you
 
+Before (v0.3.0):
 ```
-grove                     ← modify: add new subcommands
-.grove/                   ← new: state directory
-  sessions.json           ← new: session registry
-  log/                    ← new: output logs directory
-    feat-auth.log
-    fix-bug.log
-.worktrees/               ← existing: no changes
-Grovefile                 ← existing: add grove_prompts() hook (optional)
+gr status                        # running / waiting / done
+gr attach feat/auth              # only way to see what's happening
+                                 # only way to approve
 ```
 
-That's the whole architecture. A bash script, a JSON file, and some log
-files. Everything else is built on top of that.
+After:
+```
+gr                               # dashboard: status + diff stats + activity
+gr approve --all                 # approve everything waiting, don't even attach
+gr send feat/auth "try tests/"   # redirect an agent without attaching
+gr kill feat/auth                # stop a runaway, review its work later
+```
+
+The difference: you manage your grove **from the outside**. Check in when
+you want to. Approve, redirect, or kill from the command line. Only attach
+when you actually need to take the wheel.
+
+That's the product. Not a TUI. Not a web dashboard. A CLI that lets you
+tend a grove of agents without context-switching into each one.
