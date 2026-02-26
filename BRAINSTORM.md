@@ -24,6 +24,109 @@ purpose-built for the agent-per-branch workflow.
 
 ---
 
+## CLI: git-style commands
+
+Commands mirror git so they're already in your muscle memory.
+
+```
+grove init                        # init grove in this repo
+grove checkout feat/auth          # worktree + agent session on existing branch
+grove checkout -b feat/new        # create branch + worktree + session
+grove branch                      # list active sessions (like git branch)
+grove status                      # status of all sessions w/ activity
+grove attach feat/auth            # drop into a session's terminal
+grove diff feat/auth              # what has the agent changed vs base
+grove log feat/auth               # recent output from session
+grove send feat/auth "y"          # send raw input to a session
+grove approve feat/auth           # shorthand: approve pending prompt
+grove kill feat/auth              # stop agent, keep worktree
+grove rm feat/auth                # kill + remove worktree + branch cleanup
+grove ui                          # launch TUI client
+```
+
+### Why these verbs
+
+| grove command    | git parallel        | what it does                          |
+|------------------|---------------------|---------------------------------------|
+| `checkout`       | `git checkout`      | switch to / create a branch context   |
+| `checkout -b`    | `git checkout -b`   | create new branch + context           |
+| `branch`         | `git branch`        | list branches (that have sessions)    |
+| `status`         | `git status`        | show state of working sessions        |
+| `diff`           | `git diff`          | show what changed                     |
+| `log`            | `git log`           | show history (of agent output)        |
+| `rm`             | `git branch -D`     | delete branch context                 |
+| `init`           | `git init`          | initialize grove in a repo            |
+
+New verbs (no git parallel, but natural):
+- `attach` — enter a session (like ssh/tmux attach)
+- `send` — pipe input to a session
+- `approve` — approve a waiting prompt (sugar for `send <id> "y"`)
+- `kill` — stop agent but keep the worktree around for review
+- `ui` — launch the TUI client
+
+### Agent adapters
+
+Generic byte-stream monitoring works for any agent, but agents like Claude Code
+and Codex expose structured output that's far richer than raw terminal bytes.
+Agent adapters parse this structured output so the engine knows more:
+
+```
+generic adapter (any agent):
+  "bytes are flowing"        → status: active
+  "no output for 60s"        → status: idle
+  "output matches prompt"    → status: waiting_input
+
+claude adapter:
+  "reading src/auth.ts"      → activity: reading file
+  "editing src/routes.ts"    → activity: editing file
+  "tool use: Bash"           → activity: running command
+  "Allow / Deny"             → status: waiting_input (permission prompt)
+  "45k tokens used"          → metrics: token usage
+
+codex adapter:
+  structured output parsing  → same enriched status + activity
+```
+
+The engine ships a generic adapter. Agent-specific adapters are optional
+plugins. You get basic status for any agent out of the box, and rich
+status for agents that support it.
+
+### Triage workflow (lazy-grove)
+
+The real workflow isn't watching agents work — it's reviewing what they
+produced. Like lazygit for agent output:
+
+```
+grove — myproject                                    4 sessions
+
+  feat/auth        ● active    +87 -12  3 files
+  feat/payments    ⚠ waiting   +245 -31  8 files
+  fix/login-bug    ◐ thinking  +12 -4   1 file
+  refactor/db      ■ done      +156 -89  6 files
+
+─────────────────────────────────────────────────────────────
+  refactor/db — diff vs main
+
+  src/db/connection.ts                    +34 -22
+  src/db/migrations/004_indexes.ts        +45 (new)
+  src/db/queries.ts                       +77 -67
+
+  @@ -15,7 +15,20 @@
+   import { Pool } from 'pg';
+  -const pool = new Pool(config);
+  +const pool = new Pool({
+  +  ...config,
+  +  max: 20,
+  +  idleTimeoutMillis: 30000,
+
+  [enter] expand  [a]pprove  [r]eject  [j/k] files  [q] back
+```
+
+You don't tend a grove by staring at each tree. You walk through, check
+the ones that need attention, and move on.
+
+---
+
 ## Architecture: engine + clients
 
 ```
@@ -102,7 +205,7 @@ session {
 ### Session lifecycle
 
 ```
-grove open feat/auth
+grove checkout feat/auth
   │
   ├── create worktree (if needed)
   ├── run grove_setup() (if defined)
@@ -188,21 +291,26 @@ others can be added later.
 
 ### CLI (`grove` — bash, already exists)
 
-The current bash script. Stays as-is for basic operations:
+The current bash script with git-style commands:
 
 ```bash
-grove feat/auth          # create agent session
-grove ls                 # list sessions
-grove attach feat/auth   # attach to session
-grove rm feat/auth       # kill + cleanup
+grove checkout feat/auth    # worktree + session
+grove checkout -b feat/new  # new branch + worktree + session
+grove branch                # list sessions
+grove status                # session status with activity
+grove attach feat/auth      # drop into session
+grove diff feat/auth        # what the agent changed
+grove log feat/auth         # recent agent output
+grove approve feat/auth     # approve pending prompt
+grove rm feat/auth          # kill + cleanup
 ```
 
 For simple workflows this is all you need. No daemon, no engine — just the
 bash script calling tmux/dtach directly. The engine is optional.
 
 When the engine IS running, the CLI talks to it instead of managing
-tmux/dtach directly. Same commands, richer output (status indicators, event
-awareness).
+tmux/dtach directly. Same commands, richer output (agent adapter data,
+status indicators, event awareness).
 
 ### TUI (`grove ui`)
 
@@ -288,7 +396,7 @@ grove_prompts() {
 }
 ```
 
-Clone a repo with a Grovefile. Run `grove feat/whatever`. Done. The
+Clone a repo with a Grovefile. Run `grove checkout feat/whatever`. Done. The
 environment configures itself.
 
 ### 3. Human-in-the-loop as a first-class feature
@@ -324,8 +432,8 @@ The engine as a standalone daemon, with the CLI as the first client.
 5. **CLI integration** — `grove` talks to the engine when it's running,
    falls back to direct tmux when it's not
 
-Ship this. It's useful standalone — `grove ls` shows richer status, the CLI
-gains `grove status` and `grove approve` commands.
+Ship this. It's useful standalone — `grove branch` and `grove status` show
+richer info, the CLI gains `grove approve` and `grove log` commands.
 
 ### Phase 2: TUI
 
@@ -386,9 +494,9 @@ exactly as it does today.
 
 ## Open questions
 
-1. **Daemon lifecycle** — who starts the engine? `grove up`? Auto-start on
-   first `grove open`? Systemd/launchd service? Should it even be a long-running
-   daemon, or a short-lived process that starts on demand?
+1. **Daemon lifecycle** — who starts the engine? `grove init --daemon`?
+   Auto-start on first `grove checkout`? Systemd/launchd service? Should it
+   even be a long-running daemon, or a short-lived process that starts on demand?
 
 2. **Multi-repo** — should one engine manage multiple repos? Or one engine
    per repo? Per-repo is simpler and matches the Grovefile convention.
