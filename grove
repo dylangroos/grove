@@ -175,14 +175,20 @@ is_agent_running() {
     socket="$(grove_socket_path "$wt_dir")"
     [[ -S "$socket" ]] || return 1
     # Verify dtach process is alive; clean up stale socket
-    if command -v lsof >/dev/null 2>&1; then
-        local pid
+    local pid=""
+    if command -v fuser >/dev/null 2>&1; then
+        pid="$(fuser "$socket" 2>/dev/null | tr -d '[:space:]')" || true
+    fi
+    if [[ -z "$pid" ]] && command -v lsof >/dev/null 2>&1; then
         pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
-        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    fi
+    if [[ -n "$pid" ]]; then
+        if ! kill -0 "$pid" 2>/dev/null; then
             rm -f "$socket"
             return 1
         fi
     fi
+    # If neither fuser nor lsof found a PID, trust the socket exists
     return 0
 }
 
@@ -195,7 +201,7 @@ file_mtime() {
 }
 
 strip_ansi() {
-    sed 's/\\x1b\\[[0-9;?]*[a-zA-Z]//g; s/\\x1b\\][^\\x07]*\\x07//g; s/\\x1b(B//g' | tr -d '\\r'
+    sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b(B//g' | tr -d '\r'
 }
 
 get_agent_status() {
@@ -246,8 +252,13 @@ kill_agent() {
 
     if [[ -S "$socket" ]]; then
         # Get the PID of the dtach process from the socket
-        local pid
-        pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        local pid=""
+        if command -v fuser >/dev/null 2>&1; then
+            pid="$(fuser "$socket" 2>/dev/null | tr -d '[:space:]')" || true
+        fi
+        if [[ -z "$pid" ]] && command -v lsof >/dev/null 2>&1; then
+            pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        fi
 
         if [[ -n "$pid" ]]; then
             kill "$pid" 2>/dev/null || true
@@ -780,6 +791,35 @@ cmd_approve() {
     cmd_send "$target" "y"
 }
 
+cmd_kill() {
+    local branch="${1:-}"
+
+    if [[ -z "$branch" ]]; then
+        echo -e "${RED}Error:${NC} Missing branch name" >&2
+        echo "Usage: gr kill <branch>" >&2
+        exit 1
+    fi
+
+    local slug wt_dir
+    slug="$(slugify_branch "$branch")"
+    wt_dir="$GROVE_ROOT/$GROVE_WORKTREE_DIR/$slug"
+
+    if [[ ! -d "$wt_dir" ]]; then
+        echo -e "${RED}Error:${NC} No worktree for '$branch'" >&2
+        exit 1
+    fi
+
+    if ! is_agent_running "$wt_dir"; then
+        echo -e "${DIM}No running agent for '$branch'${NC}"
+        return 0
+    fi
+
+    kill_agent "$wt_dir"
+    echo -e "${GREEN}✓${NC} Agent killed in $branch"
+    echo -e "  ${DIM}Worktree kept at: $GROVE_WORKTREE_DIR/$slug${NC}"
+    echo -e "  ${DIM}Review: gr diff $branch${NC}"
+}
+
 cmd_rm() {
     local branch="${1:-}"
 
@@ -1046,7 +1086,7 @@ _grove_completions() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     case "$prev" in
-        attach|rm|log|diff|output|checkout|co|send|approve)
+        attach|rm|log|diff|output|checkout|co|send|approve|kill)
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
             if [[ -d "$wt_base" ]]; then
@@ -1063,7 +1103,7 @@ _grove_completions() {
             fi
             ;;
         grove|gr)
-            local subcmds="checkout status log diff output send approve rm attach init help version completions"
+            local subcmds="checkout status log diff output send approve kill rm attach init help version completions"
             local branches=""
             local wt_base
             wt_base="$(git rev-parse --show-toplevel 2>/dev/null)/.worktrees"
@@ -1101,6 +1141,7 @@ $(echo -e "${BOLD}USAGE:${NC}")
   gr send <branch> <text>          Send input to a running agent
   gr approve <branch>              Approve a waiting agent prompt
   gr approve --all                 Approve all waiting agents
+  gr kill <branch>                 Stop agent, keep worktree for review
   gr rm <branch>                  Kill agent + remove worktree
   gr rm --all                     Remove everything (with confirmation)
 
@@ -1176,11 +1217,15 @@ main() {
             ;;
         send)
             load_grovefile
-            cmd_send "${2:-}" "${3:-}"
+            cmd_send "${2:-}" "${*:3}"
             ;;
         approve)
             load_grovefile
             cmd_approve "${2:-}"
+            ;;
+        kill)
+            load_grovefile
+            cmd_kill "${2:-}"
             ;;
         completions)
             cmd_completions

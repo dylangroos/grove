@@ -114,6 +114,7 @@ setup_test_repo() {
     git init --initial-branch=main . >/dev/null 2>&1
     git config user.email "test@grove.wtf"
     git config user.name "Grove Test"
+    git config commit.gpgsign false
     git commit --allow-empty -m "initial commit" >/dev/null 2>&1
 
     cp "$GROVE_BIN" "$TEST_DIR/grove"
@@ -136,8 +137,13 @@ cleanup() {
         # Find and kill dtach processes for our test worktrees
         for socket in "$TEST_DIR"/.worktrees/*/.grove-socket; do
             if [[ -S "$socket" ]]; then
-                local pid
-                pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+                local pid=""
+                if command -v fuser >/dev/null 2>&1; then
+                    pid="$(fuser "$socket" 2>/dev/null | tr -d '[:space:]')" || true
+                fi
+                if [[ -z "$pid" ]] && command -v lsof >/dev/null 2>&1; then
+                    pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+                fi
                 if [[ -n "$pid" ]]; then
                     kill "$pid" 2>/dev/null || true
                 fi
@@ -575,8 +581,13 @@ test_status_shows_done_after_agent_exits() {
     # Kill the agent to simulate completion
     local socket="$TEST_DIR/.worktrees/feat-auth/.grove-socket"
     if [[ -S "$socket" ]]; then
-        local pid
-        pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        local pid=""
+        if command -v fuser >/dev/null 2>&1; then
+            pid="$(fuser "$socket" 2>/dev/null | tr -d '[:space:]')" || true
+        fi
+        if [[ -z "$pid" ]] && command -v lsof >/dev/null 2>&1; then
+            pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        fi
         if [[ -n "$pid" ]]; then
             kill "$pid" 2>/dev/null || true
             sleep 0.5
@@ -728,8 +739,13 @@ test_checkout_continue_after_done() {
     # Kill the agent to simulate completion
     local socket="$TEST_DIR/.worktrees/feat-auth/.grove-socket"
     if [[ -S "$socket" ]]; then
-        local pid
-        pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        local pid=""
+        if command -v fuser >/dev/null 2>&1; then
+            pid="$(fuser "$socket" 2>/dev/null | tr -d '[:space:]')" || true
+        fi
+        if [[ -z "$pid" ]] && command -v lsof >/dev/null 2>&1; then
+            pid="$(lsof -t "$socket" 2>/dev/null | head -1)" || true
+        fi
         if [[ -n "$pid" ]]; then
             kill "$pid" 2>/dev/null || true
             sleep 0.5
@@ -860,7 +876,7 @@ test_status_has_indicators() {
     local output rc=0
     output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
     assert_exit 0 "$rc" "exit code"
-    assert_contains "$output" "done" "uses done indicator"
+    assert_contains "$output" "■" "uses Unicode done indicator (■)"
     cleanup
 }
 
@@ -889,6 +905,154 @@ test_help_shows_status_description() {
     output=$(./grove help 2>&1) || rc=$?
     assert_exit 0 "$rc" "exit code"
     assert_contains "$output" "status" "help mentions status"
+    cleanup
+}
+
+test_send_happy_path() {
+    echo -e "${BOLD}42. send delivers text to running agent${NC}"
+    setup_test_repo
+
+    # Create a mock agent that reads input and echoes it
+    cat > "$TEST_DIR/bin/mock-agent" <<'AGENT'
+#!/bin/bash
+echo "agent started, waiting for input"
+read -r line
+echo "received: $line"
+sleep 5
+AGENT
+    chmod +x "$TEST_DIR/bin/mock-agent"
+
+    PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "test send" >/dev/null 2>&1
+    sleep 1
+
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove send feat/auth "hello world" 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Sent to" "confirms send"
+
+    # Give agent time to process
+    sleep 1
+
+    # Check log file for the received text
+    local log_file="$TEST_DIR/.worktrees/feat-auth/.grove-agent.log"
+    if [[ -f "$log_file" ]]; then
+        local log_content
+        log_content="$(cat "$log_file")"
+        assert_contains "$log_content" "received: hello world" "agent received input"
+    else
+        fail "agent received input" "log file not found"
+    fi
+
+    cleanup
+}
+
+test_kill_happy_path() {
+    echo -e "${BOLD}43. kill stops agent but keeps worktree${NC}"
+    setup_test_repo
+
+    PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "test kill" >/dev/null 2>&1
+    sleep 0.5
+
+    # Verify agent is running
+    local socket="$TEST_DIR/.worktrees/feat-auth/.grove-socket"
+    [[ -S "$socket" ]] || fail "agent running before kill" "socket not found"
+
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove kill feat/auth 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "Agent killed" "confirms kill"
+    assert_contains "$output" "Worktree kept" "mentions worktree kept"
+    assert_contains "$output" "gr diff" "suggests review"
+
+    # Worktree should still exist
+    [[ -d "$TEST_DIR/.worktrees/feat-auth" ]] \
+        && pass "worktree preserved after kill" \
+        || fail "worktree preserved after kill"
+
+    # Socket should be gone
+    sleep 0.5
+    [[ ! -S "$socket" ]] \
+        && pass "socket removed after kill" \
+        || fail "socket removed after kill"
+
+    cleanup
+}
+
+test_kill_missing_args() {
+    echo -e "${BOLD}44. kill missing args${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove kill 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "Missing branch name" "error message"
+
+    cleanup
+}
+
+test_kill_no_worktree() {
+    echo -e "${BOLD}45. kill no worktree${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove kill nonexistent 2>&1) || rc=$?
+    assert_exit 1 "$rc" "exit code"
+    assert_contains "$output" "No worktree" "error message"
+
+    cleanup
+}
+
+test_kill_no_running_agent() {
+    echo -e "${BOLD}46. kill no running agent is graceful${NC}"
+    setup_test_repo
+
+    mkdir -p "$TEST_DIR/.worktrees"
+    git -C "$TEST_DIR" worktree add "$TEST_DIR/.worktrees/feat-auth" -b feat/auth >/dev/null 2>&1
+
+    local output rc=0
+    output=$(./grove kill feat/auth 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "No running agent" "graceful message"
+
+    cleanup
+}
+
+test_status_running_indicator() {
+    echo -e "${BOLD}47. status shows running indicator for active agent${NC}"
+    setup_test_repo
+
+    PATH="$TEST_DIR/bin:$PATH" ./grove checkout feat/auth "test" >/dev/null 2>&1
+    sleep 0.5
+
+    local output rc=0
+    output=$(PATH="$TEST_DIR/bin:$PATH" ./grove status 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "●" "uses Unicode running indicator (●)"
+
+    cleanup
+}
+
+test_help_shows_kill() {
+    echo -e "${BOLD}48. help shows kill command${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove help 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "kill" "help shows kill"
+
+    cleanup
+}
+
+test_completions_include_kill() {
+    echo -e "${BOLD}49. completions include kill${NC}"
+    setup_test_repo
+
+    local output rc=0
+    output=$(./grove completions 2>&1) || rc=$?
+    assert_exit 0 "$rc" "exit code"
+    assert_contains "$output" "kill" "completions include kill"
+
     cleanup
 }
 
@@ -954,6 +1118,15 @@ main() {
     test_status_has_indicators
     test_status_shows_diff_stats
     test_help_shows_status_description
+
+    test_send_happy_path
+    test_kill_happy_path
+    test_kill_missing_args
+    test_kill_no_worktree
+    test_kill_no_running_agent
+    test_status_running_indicator
+    test_help_shows_kill
+    test_completions_include_kill
 
     # Restore ~/.grove
     if [[ -n "$SAVED_GROVE_CONFIG" ]]; then
